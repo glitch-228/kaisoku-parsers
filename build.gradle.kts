@@ -24,7 +24,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
             "-opt-in=kotlin.RequiresOptIn",
             "-opt-in=kotlin.contracts.ExperimentalContracts",
             "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
-            "-opt-in=org.koitharu.kotatsu.parsers.InternalParsersApi",
+            "-opt-in=org.koitharu.Kaisoku.parsers.InternalParsersApi",
         )
     }
 }
@@ -51,7 +51,7 @@ dependencies {
     implementation(libs.androidx.collection)
     api(libs.jsoup)
 
-    ksp(project(":kotatsu-parsers-ksp"))
+    ksp(project(":Kaisoku-parsers-ksp"))
 
     testImplementation(libs.junit.api)
     testImplementation(libs.junit.engine)

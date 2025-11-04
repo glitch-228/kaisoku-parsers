@@ -1,0 +1,37 @@
+package org.koitharu.Kaisoku.parsers.site.madtheme.en
+
+import org.koitharu.Kaisoku.parsers.MangaLoaderContext
+import org.koitharu.Kaisoku.parsers.MangaSourceParser
+import org.koitharu.Kaisoku.parsers.model.MangaChapter
+import org.koitharu.Kaisoku.parsers.model.MangaPage
+import org.koitharu.Kaisoku.parsers.model.MangaParserSource
+import org.koitharu.Kaisoku.parsers.site.madtheme.MadthemeParser
+import org.koitharu.Kaisoku.parsers.util.toAbsoluteUrl
+import org.koitharu.Kaisoku.parsers.util.generateUid
+import org.koitharu.Kaisoku.parsers.util.parseHtml
+
+@MangaSourceParser("MANGAFOREST", "MangaForest", "en")
+internal class MangaForest(context: MangaLoaderContext) :
+	MadthemeParser(context, MangaParserSource.MANGAFOREST, "mangaforest.me") {
+	
+	private val subDomain = "sb.mbcdn.xyz"
+
+	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
+		val fullUrl = chapter.url.toAbsoluteUrl(domain)
+		val doc = webClient.httpGet(fullUrl).parseHtml()
+		val regexPages = Regex("chapImages\\s*=\\s*['\"](.*?)['\"]")
+		val pages = doc.select("script").firstNotNullOfOrNull { script ->
+			regexPages.find(script.html())?.groupValues?.getOrNull(1)
+		}?.split(',')
+
+		return pages?.map { url ->
+			val cleanUrl = url.substringAfter("/manga")
+			MangaPage(
+				id = generateUid(url),
+				url = "https://$subDomain/manga$cleanUrl",
+				preview = null,
+				source = source,
+			)
+		} ?: emptyList()
+	}
+}

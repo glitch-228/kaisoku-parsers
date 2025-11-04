@@ -29,11 +29,11 @@ body:
             required: false
 
     -   type: input
-        id: kotatsu-version
+        id: Kaisoku-version
         attributes:
-            label: Kotatsu version
+            label: Kaisoku version
             description: |
-                You can find your Kotatsu version in **Settings → About**.
+                You can find your Kaisoku version in **Settings → About**.
             placeholder: |
                 Example: "3.3"
         validations:
