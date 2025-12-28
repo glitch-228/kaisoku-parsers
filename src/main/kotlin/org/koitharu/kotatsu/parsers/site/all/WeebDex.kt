@@ -255,7 +255,13 @@ internal abstract class WeebDexParser(
 
             // Filter by language - only include chapters in the requested language
             val chapterLang = chapter.optString("language", "")
-            if (chapterLang != lang) continue
+            // Match language codes (handle pt-br, en-us, etc.)
+            val langMatches = when {
+                chapterLang == lang -> true
+                chapterLang.startsWith("$lang-") -> true // pt-br matches pt
+                else -> false
+            }
+            if (!langMatches) continue
 
             val chapterId = chapter.getString("id")
             val chapterNumber = chapter.optString("chapter", "0")
@@ -363,8 +369,8 @@ internal abstract class WeebDexParser(
             }
         }
 
-        // Sort by chapter number (ascending) - oldest first for reading order
-        return chapters.sortedBy { it.number }
+        // Sort by chapter number (descending) - newest first
+        return chapters.sortedByDescending { it.number }
     }
 
     private data class ChapterData(
