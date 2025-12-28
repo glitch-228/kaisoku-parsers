@@ -91,11 +91,16 @@ internal class AtsuMoe(context: MangaLoaderContext) :
         // List results have "image", search results have "poster"
         val image = json.optString("image")
         val poster = json.optString("poster")
-        val coverUrl = when {
-            image.isNotEmpty() -> "https://$domain/static/$image"
-            poster.isNotEmpty() -> "https://$domain/static/$poster"
-            else -> null
-        }
+        val imagePath = image.ifEmpty { poster }
+
+        val coverUrl = if (imagePath.isNotEmpty()) {
+            when {
+                imagePath.startsWith("http") -> imagePath
+                imagePath.startsWith("/static/") -> "https://$domain$imagePath"
+                imagePath.startsWith("/") -> "https://$domain$imagePath"
+                else -> "https://$domain/static/$imagePath"
+            }
+        } else null
 
         return Manga(
             id = generateUid(id),
@@ -162,14 +167,8 @@ internal class AtsuMoe(context: MangaLoaderContext) :
             else -> null
         }
 
-        // Parse chapters from mangaPage
-        val chaptersArray = mangaPage.optJSONArray("chapters")
-        val chapters = if (chaptersArray != null) {
-            (0 until chaptersArray.length()).map { i ->
-                val chapter = chaptersArray.getJSONObject(i)
-                parseChapter(chapter, mangaId)
-            }
-        } else emptyList()
+        // Fetch all chapters from the chapters endpoint with pagination
+        val chapters = fetchAllChapters(mangaId)
 
         return manga.copy(
             title = title,
@@ -180,6 +179,28 @@ internal class AtsuMoe(context: MangaLoaderContext) :
             state = state,
             chapters = chapters
         )
+    }
+
+    private suspend fun fetchAllChapters(mangaId: String): List<MangaChapter> {
+        val allChapters = mutableListOf<MangaChapter>()
+        var currentPage = 0
+        var totalPages = 1
+
+        while (currentPage < totalPages) {
+            val url = "${apiUrl}manga/chapters?id=$mangaId&filter=all&sort=desc&page=$currentPage"
+            val json = webClient.httpGet(url).parseJson()
+
+            val chaptersArray = json.getJSONArray("chapters")
+            for (i in 0 until chaptersArray.length()) {
+                val chapter = chaptersArray.getJSONObject(i)
+                allChapters.add(parseChapter(chapter, mangaId))
+            }
+
+            totalPages = json.getInt("pages")
+            currentPage++
+        }
+
+        return allChapters.reversed()
     }
 
     private fun parseChapter(json: JSONObject, mangaId: String): MangaChapter {
