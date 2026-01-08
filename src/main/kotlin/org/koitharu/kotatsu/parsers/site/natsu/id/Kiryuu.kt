@@ -76,12 +76,27 @@ internal class Kiryuu(context: MangaLoaderContext) :
             })();
         """.trimIndent()
 
-        val html = context.evaluateJs(mangaAbsoluteUrl, pageScript, timeout = 30000L)
+        val rawResult = context.evaluateJs(mangaAbsoluteUrl, pageScript, timeout = 30000L)
             ?.takeIf { it.isNotBlank() }
             ?: throw Exception("Failed to extract chapter data from WebView")
 
+        // Unquote and unescape the JSON string if needed
+        val jsonString = if (rawResult.startsWith("\"") && rawResult.endsWith("\"")) {
+            rawResult.substring(1, rawResult.length - 1)
+                .replace("\\\"", "\"")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace(Regex("""\\u([0-9A-Fa-f]{4})""")) { match ->
+                    val hexValue = match.groupValues[1]
+                    hexValue.toInt(16).toChar().toString()
+                }
+        } else {
+            rawResult
+        }
+
         // Parse the JSON response from JavaScript
-        val chaptersJson = org.json.JSONArray(html)
+        val chaptersJson = org.json.JSONArray(jsonString)
         val chapters = mutableListOf<MangaChapter>()
 
         for (i in 0 until chaptersJson.length()) {
