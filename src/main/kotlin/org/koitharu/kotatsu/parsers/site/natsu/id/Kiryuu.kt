@@ -47,11 +47,17 @@ internal class Kiryuu(context: MangaLoaderContext) :
                     window.__kiryuuRetryCount++;
                     console.log('[Kiryuu] Waiting for chapters to load... (attempt ' + window.__kiryuuRetryCount + ')');
 
-                    // If we've waited for 5 polls (about 5 seconds) without chapters loading, try clicking again
-                    if (window.__kiryuuRetryCount >= 5 && tabButton) {
-                        console.log('[Kiryuu] Chapters not loading, clicking button again...');
-                        tabButton.click();
-                        window.__kiryuuRetryCount = 0;
+                    // If we've waited for 5 polls (about 5 seconds) without chapters loading, reload the page
+                    if (window.__kiryuuRetryCount >= 5) {
+                        if (!window.__kiryuuReloaded) {
+                            console.log('[Kiryuu] Chapters not loading after 5 seconds, reloading page...');
+                            window.__kiryuuReloaded = true;
+                            window.location.reload();
+                            return null;
+                        } else {
+                            // Already reloaded once, give up
+                            console.log('[Kiryuu] Already reloaded once, timing out...');
+                        }
                     }
 
                     return null; // Keep polling
