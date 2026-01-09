@@ -262,19 +262,36 @@ internal class KdtScans(context: MangaLoaderContext) :
 
         // Sequential image loading with 404 detection
         val pages = mutableListOf<MangaPage>()
-
         var imageIndex = 1
-        while (true) {
+        var consecutive404s = 0
+        val maxConsecutive404s = 3
+
+        while (imageIndex <= 500) {
             val imageUrl = "$basePath$imageIndex$extension"
 
             // Try to fetch the image
             val response = webClient.httpHead(imageUrl)
 
             if (response.code == 404) {
-                break // No more images
-            }
-
-            if (response.isSuccessful) {
+                consecutive404s++
+                // Stop if we get too many consecutive 404s
+                if (consecutive404s >= maxConsecutive404s) {
+                    break
+                }
+            } else if (response.isSuccessful) {
+                // Reset counter on successful response
+                consecutive404s = 0
+                pages.add(
+                    MangaPage(
+                        id = generateUid(imageUrl),
+                        url = imageUrl,
+                        preview = null,
+                        source = source,
+                    )
+                )
+            } else {
+                // For other errors (403, 500, etc), treat as potential image
+                consecutive404s = 0
                 pages.add(
                     MangaPage(
                         id = generateUid(imageUrl),
@@ -286,9 +303,6 @@ internal class KdtScans(context: MangaLoaderContext) :
             }
 
             imageIndex++
-
-            // Safety limit to prevent infinite loops
-            if (imageIndex > 500) break
         }
 
         return pages

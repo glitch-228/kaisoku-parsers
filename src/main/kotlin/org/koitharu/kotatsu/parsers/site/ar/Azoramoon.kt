@@ -2,6 +2,8 @@ package org.koitharu.kotatsu.parsers.site.ar
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import org.json.JSONArray
+import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -37,35 +39,37 @@ internal class Azoramoon(context: MangaLoaderContext) :
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val url = buildString {
-			append("https://")
+			append("https://api.")
 			append(domain)
-			append("/series/")
+			append("/api/query")
 
 			val params = mutableListOf<String>()
+
+			// Add pagination
+			params.add("page=$page")
+			params.add("perPage=24")
 
 			// Add search query
 			if (!filter.query.isNullOrEmpty()) {
 				params.add("searchTerm=${filter.query!!.urlEncoded()}")
 			}
 
-			// Add genre filters
+			// Add genre filters (comma-separated)
 			if (filter.tags.isNotEmpty()) {
 				val genreIds = filter.tags.joinToString(",") { it.key }
-				params.add("genres=%2B$genreIds")
+				params.add("genreIds=$genreIds")
 			}
 
 			// Add sort filter
-			params.add("sortBy=" + when (order) {
-				SortOrder.UPDATED -> "newest"
-				SortOrder.POPULARITY -> "popular"
-				SortOrder.ALPHABETICAL -> "alphabetical"
-				else -> "newest"
-			})
-
-			// Add page parameter (if pagination is supported)
-			if (page > 1) {
-				params.add("page=$page")
+			val (orderBy, orderDirection) = when (order) {
+				SortOrder.UPDATED -> "lastChapterAddedAt" to "desc"
+				SortOrder.POPULARITY -> "totalViews" to "desc"
+				SortOrder.NEWEST -> "createdAt" to "desc"
+				SortOrder.ALPHABETICAL -> "postTitle" to "asc"
+				else -> "lastChapterAddedAt" to "desc"
 			}
+			params.add("orderBy=$orderBy")
+			params.add("orderDirection=$orderDirection")
 
 			// Append parameters
 			if (params.isNotEmpty()) {
@@ -74,54 +78,166 @@ internal class Azoramoon(context: MangaLoaderContext) :
 			}
 		}
 
-		val doc = webClient.httpGet(url).parseHtml()
+		val json = webClient.httpGet(url).parseJson()
+		return parseMangaList(json)
+	}
 
-		// Parse manga cards from the grid layout
-		return doc.select("section > div > a[href*='/series/']").mapNotNull { card ->
-			val href = card.attrAsRelativeUrlOrNull("href") ?: return@mapNotNull null
-			val img = card.selectFirst("img") ?: return@mapNotNull null
-			val coverUrl = img.src()
-			val title = img.attr("alt").ifEmpty {
-				card.selectFirst("h3")?.text() ?: return@mapNotNull null
+	private fun parseMangaList(json: JSONArray): List<Manga> {
+		val result = mutableListOf<Manga>()
+
+		for (i in 0 until json.length()) {
+			val obj = json.getJSONObject(i)
+			val slug = obj.getString("slug")
+			val url = "/series/$slug"
+			val title = obj.getString("postTitle")
+			val coverUrl = obj.optString("featuredImage")
+
+			// Parse status
+			val seriesStatus = obj.optString("seriesStatus", "")
+			val state = when (seriesStatus.uppercase()) {
+				"ONGOING" -> MangaState.ONGOING
+				"COMPLETED" -> MangaState.FINISHED
+				"HIATUS" -> MangaState.PAUSED
+				else -> null
 			}
 
-			Manga(
-				id = generateUid(href),
-				title = title,
-				altTitles = emptySet(),
-				url = href,
-				publicUrl = href.toAbsoluteUrl(domain),
-				rating = RATING_UNKNOWN,
-				contentRating = null,
-				coverUrl = coverUrl,
-				tags = emptySet(),
-				state = null,
-				authors = emptySet(),
-				source = source,
+			// Parse genres
+			val genresArray = obj.optJSONArray("genres")
+			val tags = if (genresArray != null) {
+				(0 until genresArray.length()).mapNotNullToSet { idx ->
+					val genre = genresArray.getJSONObject(idx)
+					MangaTag(
+						key = genre.getInt("id").toString(),
+						title = genre.getString("name"),
+						source = source,
+					)
+				}
+			} else {
+				emptySet()
+			}
+
+			result.add(
+				Manga(
+					id = generateUid(url),
+					title = title,
+					altTitles = emptySet(),
+					url = url,
+					publicUrl = url.toAbsoluteUrl(domain),
+					rating = RATING_UNKNOWN,
+					contentRating = null,
+					coverUrl = coverUrl,
+					tags = tags,
+					state = state,
+					authors = emptySet(),
+					source = source,
+				)
 			)
 		}
+
+		return result
 	}
 
 	private suspend fun fetchAvailableTags(): Set<MangaTag> {
-		val doc = webClient.httpGet("https://$domain/series/").parseHtml()
-
-		// Extract genres from the page
-		return doc.select("button[data-genre-id], a[href*='genres=']").mapNotNullToSet { element ->
-			val genreId = element.attr("data-genre-id").ifEmpty {
-				element.attr("href").substringAfter("genres=").substringBefore("&")
-			}
-			val genreName = element.text().trim()
-
-			if (genreId.isNotEmpty() && genreName.isNotEmpty()) {
-				MangaTag(
-					key = genreId,
-					title = genreName,
-					source = source,
-				)
-			} else {
-				null
-			}
-		}
+		// Hardcoded genre list from the API
+		return setOf(
+			MangaTag("1", "أكشن", source),
+			MangaTag("2", "حريم", source),
+			MangaTag("3", "زمكاني", source),
+			MangaTag("4", "سحر", source),
+			MangaTag("5", "شونين", source),
+			MangaTag("6", "مغامرات", source),
+			MangaTag("7", "خيال", source),
+			MangaTag("8", "رومانسي", source),
+			MangaTag("9", "كوميدي", source),
+			MangaTag("10", "مانهوا", source),
+			MangaTag("11", "إثارة", source),
+			MangaTag("12", "دراما", source),
+			MangaTag("13", "تاريخي", source),
+			MangaTag("14", "راشد", source),
+			MangaTag("15", "سينين", source),
+			MangaTag("16", "خارق للطبيعة", source),
+			MangaTag("17", "شياطين", source),
+			MangaTag("18", "حياة مدرسية", source),
+			MangaTag("19", "جوسي", source),
+			MangaTag("20", "مانها", source),
+			MangaTag("21", "ويبتون", source),
+			MangaTag("22", "شينين", source),
+			MangaTag("23", "قوة خارقة", source),
+			MangaTag("24", "خيال علمي", source),
+			MangaTag("25", "غموض", source),
+			MangaTag("26", "مأساة", source),
+			MangaTag("27", "شريحة من الحياة", source),
+			MangaTag("28", "فنون قتالية", source),
+			MangaTag("29", "شوجو", source),
+			MangaTag("30", "ايسكاي", source),
+			MangaTag("31", "مصاصي الدماء", source),
+			MangaTag("32", "اسبوعي", source),
+			MangaTag("33", "لعبة", source),
+			MangaTag("34", "نفسي", source),
+			MangaTag("35", "وحوش", source),
+			MangaTag("36", "الحياة اليومية", source),
+			MangaTag("37", "الحياة المدرسية", source),
+			MangaTag("38", "رعب", source),
+			MangaTag("39", "عسكري", source),
+			MangaTag("40", "رياضي", source),
+			MangaTag("41", "اتشي", source),
+			MangaTag("42", "ايشي", source),
+			MangaTag("43", "دموي", source),
+			MangaTag("44", "زومبي", source),
+			MangaTag("45", "مميز", source),
+			MangaTag("46", "ايسيكاي", source),
+			MangaTag("47", "فنتازيا", source),
+			MangaTag("48", "اشباح", source),
+			MangaTag("49", "إعادة إحياء", source),
+			MangaTag("50", "بطل غير اعتيادي", source),
+			MangaTag("51", "ثأر", source),
+			MangaTag("52", "اثارة", source),
+			MangaTag("53", "تراجيدي", source),
+			MangaTag("54", "طبخ", source),
+			MangaTag("55", "تناسخ", source),
+			MangaTag("56", "عودة بالزمن", source),
+			MangaTag("57", "انتقام", source),
+			MangaTag("58", "تجسيد", source),
+			MangaTag("59", "فانتازيا", source),
+			MangaTag("60", "عائلي", source),
+			MangaTag("61", "تجسد", source),
+			MangaTag("62", "العاب", source),
+			MangaTag("63", "عالم اخر", source),
+			MangaTag("64", "السفر عبر الزمن", source),
+			MangaTag("65", "خيالي", source),
+			MangaTag("66", "زمنكاني", source),
+			MangaTag("67", "مغامرة", source),
+			MangaTag("68", "طبي", source),
+			MangaTag("69", "عصور وسطى", source),
+			MangaTag("70", "ساموراي", source),
+			MangaTag("71", "مافيا", source),
+			MangaTag("72", "نظام", source),
+			MangaTag("73", "هوس", source),
+			MangaTag("74", "عصري", source),
+			MangaTag("75", "بطل مجنون", source),
+			MangaTag("76", "رعاية اطفال", source),
+			MangaTag("77", "زواج مدبر", source),
+			MangaTag("78", "تشويق", source),
+			MangaTag("79", "مكتبي", source),
+			MangaTag("80", "قوى خارقه", source),
+			MangaTag("81", "تحقيق", source),
+			MangaTag("82", "أيتام", source),
+			MangaTag("83", "جوسين", source),
+			MangaTag("84", "موسيقي", source),
+			MangaTag("85", "قصة حقيقة", source),
+			MangaTag("86", "موريم", source),
+			MangaTag("87", "موظفين", source),
+			MangaTag("88", "فيكتوري", source),
+			MangaTag("89", "مأساوي", source),
+			MangaTag("90", "عصر حديث", source),
+			MangaTag("91", "ندم", source),
+			MangaTag("92", "حياة جامعية", source),
+			MangaTag("93", "حاصد", source),
+			MangaTag("94", "الأرواح", source),
+			MangaTag("95", "جريمة", source),
+			MangaTag("96", "عاطفي", source),
+			MangaTag("97", "أكاديمي", source),
+		)
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga = coroutineScope {
