@@ -1,5 +1,6 @@
 package org.koitharu.kotatsu.parsers.site.en
 
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
@@ -41,6 +42,10 @@ internal class KdtScans(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.KDTSCANS, 20) {
 
     override val configKeyDomain = ConfigKey.Domain("www.silentquill.net")
+
+    override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
+        .add("Referer", "https://$domain/")
+        .build()
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.RELEVANCE,
@@ -223,16 +228,70 @@ internal class KdtScans(context: MangaLoaderContext) :
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-        val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
-        return doc.select("#readerarea img").map { img ->
-            val url = img.attr("data-src").ifEmpty { img.src().orEmpty() }
-            MangaPage(
-                id = generateUid(url),
-                url = url,
-                preview = null,
-                source = source,
-            )
+        val fullUrl = chapter.url.toAbsoluteUrl(domain)
+        val doc = webClient.httpGet(fullUrl).parseHtml()
+
+        // Extract LD+JSON schema
+        val ldJsonScript = doc.selectFirst("script[type='application/ld+json'].rank-math-schema")?.html()
+            ?: return emptyList()
+
+        // Parse JSON to get primaryImageOfPage
+        val jsonObject = JSONObject(ldJsonScript)
+        val graphArray = jsonObject.optJSONArray("@graph") ?: return emptyList()
+
+        var primaryImageUrl: String? = null
+        for (i in 0 until graphArray.length()) {
+            val item = graphArray.getJSONObject(i)
+            if (item.has("primaryImageOfPage")) {
+                val imageObj = item.getJSONObject("primaryImageOfPage")
+                primaryImageUrl = imageObj.optString("url")
+                if (primaryImageUrl.isNotBlank()) break
+            }
         }
+
+        if (primaryImageUrl.isNullOrBlank()) {
+            return emptyList()
+        }
+
+        // Extract base path and file extension from the first image URL
+        // Example: https://cdn.asdasdhg.com/Returned%20from%20Another%20World/Chapter%202.1/1.webp
+        val lastSlashIndex = primaryImageUrl.lastIndexOf('/')
+        val basePath = primaryImageUrl.substring(0, lastSlashIndex + 1)
+        val fileName = primaryImageUrl.substring(lastSlashIndex + 1)
+        val extension = fileName.substring(fileName.lastIndexOf('.'))
+
+        // Sequential image loading with 404 detection
+        val pages = mutableListOf<MangaPage>()
+
+        var imageIndex = 1
+        while (true) {
+            val imageUrl = "$basePath$imageIndex$extension"
+
+            // Try to fetch the image
+            val response = webClient.httpHead(imageUrl)
+
+            if (response.code == 404) {
+                break // No more images
+            }
+
+            if (response.isSuccessful) {
+                pages.add(
+                    MangaPage(
+                        id = generateUid(imageUrl),
+                        url = imageUrl,
+                        preview = null,
+                        source = source,
+                    )
+                )
+            }
+
+            imageIndex++
+
+            // Safety limit to prevent infinite loops
+            if (imageIndex > 500) break
+        }
+
+        return pages
     }
 
     private fun parseStatus(status: String): MangaState? {
