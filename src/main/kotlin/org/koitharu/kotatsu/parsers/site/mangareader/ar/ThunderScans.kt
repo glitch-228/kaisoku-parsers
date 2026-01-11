@@ -7,6 +7,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
+import java.util.EnumSet
 
 @MangaSourceParser("THUNDERSCANS", "ThunderScans", "ar")
 internal class ThunderScans(context: MangaLoaderContext) :
@@ -17,6 +18,12 @@ internal class ThunderScans(context: MangaLoaderContext) :
 		pageSize = 32,
 		searchPageSize = 10,
 	) {
+	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+		SortOrder.ALPHABETICAL,
+		SortOrder.POPULARITY,
+		SortOrder.NEWEST,
+	)
+
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = super.filterCapabilities.copy(
 			isTagsExclusionSupported = false,
@@ -29,6 +36,63 @@ internal class ThunderScans(context: MangaLoaderContext) :
 	override val selectChapter = ".ch-list-grid .ch-item"
 	override val datePattern = "yyyy/MM/dd"
 	override val detailsDescriptionSelector = ".lh-story-content, #manga-story"
+
+	override suspend fun getFilterOptions() = MangaListFilterOptions(
+		availableTags = fetchAvailableTags(),
+		availableStates = emptySet(),
+		availableContentTypes = emptySet(),
+	)
+
+	private suspend fun fetchAvailableTags(): Set<MangaTag> {
+		val doc = webClient.httpGet("https://$domain$listUrl/").parseHtml()
+		return doc.select(".genres-selection-grid button.genre-select-item").mapNotNullToSet { button ->
+			val slug = button.attr("data-slug").ifEmpty { return@mapNotNullToSet null }
+			val title = button.text().trim().ifEmpty { return@mapNotNullToSet null }
+			MangaTag(
+				key = slug,
+				title = title,
+				source = source,
+			)
+		}
+	}
+
+	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
+		val url = buildString {
+			append("https://")
+			append(domain)
+
+			when {
+				!filter.query.isNullOrEmpty() -> {
+					append("/page/")
+					append(page.toString())
+					append("/?s=")
+					append(filter.query.urlEncoded())
+				}
+
+				else -> {
+					append(listUrl)
+					append("/?order=")
+					append(
+						when (order) {
+							SortOrder.ALPHABETICAL -> "title"
+							SortOrder.POPULARITY -> "popular"
+							SortOrder.NEWEST -> "new"
+							else -> "new"
+						},
+					)
+
+					filter.tags.forEach {
+						append("&genre=")
+						append(it.key.urlEncoded())
+					}
+
+					append("&page=")
+					append(page.toString())
+				}
+			}
+		}
+		return parseMangaList(webClient.httpGet(url).parseHtml())
+	}
 
 	override fun parseMangaList(docs: Document): List<Manga> {
 		return docs.select(selectMangaList).mapNotNull {
@@ -137,14 +201,18 @@ internal class ThunderScans(context: MangaLoaderContext) :
 		val fullUrl = chapter.url.toAbsoluteUrl(domain)
 		val doc = webClient.httpGet(fullUrl).parseHtml()
 
-		return doc.select(".reader-area img.ts-image-minimal, #readerarea img.ts-image-minimal").mapIndexed { index, img ->
-			val imageUrl = img.src() ?: return@mapIndexed null
+		// Select all images in the reader area, regardless of class
+		return doc.select(".reader-area img, #readerarea img").mapNotNull { img ->
+			val imageUrl = img.src()
+			if (imageUrl.isNullOrBlank() || imageUrl.startsWith("data:")) {
+				return@mapNotNull null
+			}
 			MangaPage(
 				id = generateUid(imageUrl),
 				url = imageUrl,
 				preview = null,
 				source = source,
 			)
-		}.filterNotNull()
+		}
 	}
 }
