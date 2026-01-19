@@ -3,8 +3,6 @@ package org.koitharu.kotatsu.parsers.site.en
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.bitmap.Bitmap
@@ -13,8 +11,6 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.*
 import javax.crypto.Cipher
@@ -22,7 +18,6 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.min
 
-@Broken("Need to work image decrypt")
 @MangaSourceParser("MANGAGO", "Mangago", "en")
 internal class MangagoParser(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.MANGAGO, pageSize = 20), Interceptor {
@@ -481,26 +476,37 @@ internal class MangagoParser(context: MangaLoaderContext) :
         return s
     }
 
-    private fun getDescramblingKey(deobfChapterJs: String, imageUrl: String): String {
+    private suspend fun getDescramblingKey(deobfChapterJs: String, imageUrl: String): String {
         // Extract the key generation logic from the deobfuscated JavaScript
         val imgkeys = deobfChapterJs
             .substringAfter("var renImg = function(img,width,height,id){", "")
             .substringBefore("key = key.split(", "")
+            .split("\n")
+            .filter { line -> JS_FILTERS.none { filter -> line.contains(filter) } }
+            .joinToString("\n")
+            .replace("img.src", "url")
 
         if (imgkeys.isEmpty()) {
             return ""
         }
 
-        // Parse the JavaScript to extract the descrambling key
-        // This is a simplified version - the full implementation would need JS evaluation
-        // For now, return empty string which means images won't be descrambled
-        // but will still load (they'll just be scrambled)
-        return ""
+        // Build JavaScript that includes the replacePos helper and key extraction
+        val js = """
+            function replacePos(strObj, pos, replacetext) {
+                var str = strObj.substr(0, pos) + replacetext + strObj.substring(pos + 1, strObj.length);
+                return str;
+            }
+            function getDescramblingKey(url) { $imgkeys; return key; }
+            getDescramblingKey("$imageUrl");
+        """.trimIndent()
+
+        return context.evaluateJs("https://$domain/", js, 10000L) ?: ""
     }
 
-    companion object {
+    private companion object {
         private val IMG_SRCS_REGEX = Regex("""var imgsrcs\s*=\s*['"]([a-zA-Z0-9+=/]+)['"]""")
         private val COLS_REGEX = Regex("""var\s*widthnum\s*=\s*heightnum\s*=\s*(\d+);""")
         private val KEY_LOCATION_REGEX = Regex("""str\.charAt\(\s*(\d+)\s*\)""")
+        private val JS_FILTERS = listOf("jQuery", "document", "getContext", "toDataURL", "getImageData", "width", "height")
     }
 }
