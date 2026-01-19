@@ -387,18 +387,15 @@ internal class MangagoParser(context: MangaLoaderContext) :
             }
         }
 
-        // In mobile mode, try to get the image for this specific page
-        // Some pages have all images, some only have the current page's image
-        val imageUrl = if (pageNumber <= images.size) {
-            println("[MANGAGO] getPageUrl: using index ${pageNumber - 1}")
-            images[pageNumber - 1]
-        } else if (images.isNotEmpty()) {
-            // Fallback: the page might only contain its own image at index 0
-            println("[MANGAGO] getPageUrl: pageNumber $pageNumber > images.size ${images.size}, falling back to index 0")
-            images.first()
-        } else {
+        // In mobile mode, each page's imgsrcs has empty slots for previous pages,
+        // then starts with the current page's image. After filtering blanks,
+        // the FIRST image is always the current page's image.
+        if (images.isEmpty()) {
             throw Exception("No images found for page $pageNumber")
         }
+
+        println("[MANGAGO] getPageUrl: using first image (mobile mode always uses index 0)")
+        val imageUrl = images.first()
 
         println("[MANGAGO] getPageUrl: final imageUrl=${imageUrl.take(100)}")
 
