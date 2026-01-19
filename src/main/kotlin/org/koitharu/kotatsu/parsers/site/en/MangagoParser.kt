@@ -301,9 +301,8 @@ internal class MangagoParser(context: MangaLoaderContext) :
     }
 
     // Cache for deobfuscated JS to avoid re-fetching in getPageUrl
-    private var cachedDeofChapterJS: String? = null
-    private var cachedChapterJsUrl: String? = null
-    private var cachedTime: Long = 0
+    // Map of chapterJsUrl -> Pair(deobfuscatedJS, timestamp)
+    private val jsCache = mutableMapOf<String, Pair<String, Long>>()
     private val maxCacheTime = 1000 * 60 * 5 // 5 minutes
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
@@ -451,23 +450,25 @@ internal class MangagoParser(context: MangaLoaderContext) :
     private suspend fun getDeobfuscatedJS(doc: Document): String? {
         val chapterJsUrl = doc.select("script[src*=chapter.js]").firstOrNull()?.absUrl("src") ?: return null
 
-        if (cachedDeofChapterJS != null && cachedChapterJsUrl == chapterJsUrl && System.currentTimeMillis() - cachedTime < maxCacheTime) {
-            return cachedDeofChapterJS
+        val now = System.currentTimeMillis()
+        val cached = jsCache[chapterJsUrl]
+        if (cached != null && now - cached.second < maxCacheTime) {
+            return cached.first
         }
 
-        println("[MANGAGO] Fetching and deobfuscating chapter.js")
+        println("[MANGAGO] Fetching and deobfuscating chapter.js: $chapterJsUrl")
         val obfuscatedChapterJs = webClient.httpGet(chapterJsUrl).parseRaw()
         val deobf = deobfuscateSoJsonV4(obfuscatedChapterJs)
 
-        cachedDeofChapterJS = deobf
-        cachedChapterJsUrl = chapterJsUrl
-        cachedTime = System.currentTimeMillis()
+        jsCache[chapterJsUrl] = Pair(deobf, now)
         return deobf
     }
 
     private fun getColsFromDoc(doc: Document): String? {
-        // If we have cached JS, use it, otherwise try to find regex in current doc (if script tags were present)
-        val js = cachedDeofChapterJS ?: return null
+        // Get cols from cached JS for the current chapter's script URL
+        val chapterJsUrl = doc.select("script[src*=chapter.js]").firstOrNull()?.absUrl("src")
+        val cached = if (chapterJsUrl != null) jsCache[chapterJsUrl] else null
+        val js = cached?.first ?: return null
         return COLS_REGEX.find(js)?.groupValues?.get(1)
     }
 
@@ -552,37 +553,50 @@ internal class MangagoParser(context: MangaLoaderContext) :
 
     private fun unscrambleImageList(imageList: String, js: String): String {
         var imgList = imageList
-        try {
-            val keyLocations = KEY_LOCATION_REGEX.findAll(js)
-                .map { it.groupValues[1].toInt() }
-                .distinct()
-                .sorted()
-                .toList()
 
-            println("[MANGAGO] Unscramble: found ${keyLocations.size} unique key locations")
-            println("[MANGAGO] Unscramble: original image list length = ${imgList.length}")
-            println("[MANGAGO] Unscramble: keyLocations = $keyLocations")
+        // Check if unscrambling is needed - only if key locations exist and characters at those positions are digits
+        val keyLocations = KEY_LOCATION_REGEX.findAll(js)
+            .map { it.groupValues[1].toInt() }
+            .distinct()
+            .sorted()
+            .toList()
 
-            val unscrambleKey = keyLocations.map { loc ->
-                imgList[loc].toString().toInt()
-            }.toList()
-
-            println("[MANGAGO] Unscramble: extracted key = $unscrambleKey")
-
-            // Remove characters from highest to lowest index to avoid index shift
-            keyLocations.sortedDescending().forEach { loc ->
-                imgList = imgList.removeRange(loc..loc)
-            }
-
-            println("[MANGAGO] Unscramble: after removing chars, length = ${imgList.length}")
-            println("[MANGAGO] Unscramble: first 200 chars = ${imgList.take(200)}")
-
-            imgList = imgList.unscramble(unscrambleKey)
-
-            println("[MANGAGO] Unscramble: final length = ${imgList.length}")
-        } catch (e: Exception) {
-            println("[MANGAGO] Unscramble: failed - ${e.message}, using original list")
+        if (keyLocations.isEmpty()) {
+            println("[MANGAGO] Unscramble: no key locations found, returning as-is")
+            return imgList
         }
+
+        println("[MANGAGO] Unscramble: found ${keyLocations.size} unique key locations")
+        println("[MANGAGO] Unscramble: original image list length = ${imgList.length}")
+        println("[MANGAGO] Unscramble: keyLocations = $keyLocations")
+
+        // Check if characters at key locations are digits (required for unscrambling)
+        val validKeyLocations = keyLocations.filter { loc ->
+            loc < imgList.length && imgList[loc].isDigit()
+        }
+
+        if (validKeyLocations.isEmpty()) {
+            println("[MANGAGO] Unscramble: no valid digit keys at positions, returning as-is")
+            return imgList
+        }
+
+        val unscrambleKey = validKeyLocations.map { loc ->
+            imgList[loc].toString().toInt()
+        }.toList()
+
+        println("[MANGAGO] Unscramble: extracted key = $unscrambleKey")
+
+        // Remove characters from highest to lowest index to avoid index shift
+        validKeyLocations.sortedDescending().forEach { loc ->
+            imgList = imgList.removeRange(loc..loc)
+        }
+
+        println("[MANGAGO] Unscramble: after removing chars, length = ${imgList.length}")
+        println("[MANGAGO] Unscramble: first 200 chars = ${imgList.take(200)}")
+
+        imgList = imgList.unscramble(unscrambleKey)
+
+        println("[MANGAGO] Unscramble: final length = ${imgList.length}")
         return imgList
     }
 
