@@ -5,6 +5,7 @@ import kotlinx.coroutines.coroutineScope
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -16,6 +17,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSONToSet
 import java.text.SimpleDateFormat
 import java.util.*
 
+@Broken("Can't do it beceause of how they load images by stripes like tf :(")
 @MangaSourceParser("PROCHAN", "Prochan", "ar")
 internal class Prochan(context: MangaLoaderContext) : PagedMangaParser(
 	context,
