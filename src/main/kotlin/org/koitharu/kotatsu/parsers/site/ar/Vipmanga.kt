@@ -87,7 +87,7 @@ internal class Vipmanga(context: MangaLoaderContext) :
 			val mangaId = item.optInt("id")
 			val title = item.optString("title")
 			val link = item.optString("link")
-			val url = link.substringAfter("/manga/").removeSuffix("/")
+			val url = mangaId.toString()
 			val coverUrl = item.optString("image")
 			val description = item.optString("description").ifEmpty { null }
 			val statusText = item.optString("status", "")
@@ -147,8 +147,8 @@ internal class Vipmanga(context: MangaLoaderContext) :
 			val chapterId = chapterObj.optInt("chapter_id")
 			val chapterTitle = chapterObj.optString("name")
 			val chapterNumber = chapterTitle.toFloatOrNull()
-			val chapterLink = chapterObj.optString("link")
-			val url = chapterLink.substringAfter("/manga/").removeSuffix("/")
+			val chapterSlug = chapterObj.optString("link").substringAfterLast("/")
+			val url = "$mangaId/$chapterSlug"
 			val dateText = chapterObj.optString("date")
 
 			val uploadDate = try {
