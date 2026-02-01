@@ -171,10 +171,7 @@ internal class Komikcast(context: MangaLoaderContext) :
 			append(chapterIndex)
 		}
 
-		val json = webClient.httpGet(
-			url,
-			headers = mapOf("Referer" to "https://v1.komikcast.fit/")
-		).body?.string() ?: throw Exception("Failed to fetch chapter pages")
+		val json = webClient.httpGet(url).body?.string() ?: throw Exception("Failed to fetch chapter pages")
 		val chapterData = parseChapterDetailJson(json)
 
 		val images = chapterData.dataImages.entries.sortedBy { it.key.toIntOrNull() ?: 0 }
@@ -189,6 +186,10 @@ internal class Komikcast(context: MangaLoaderContext) :
 			)
 		}
 	}
+
+	override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
+		.add("Referer", "https://v1.komikcast.fit/")
+		.build()
 
 	private suspend fun fetchGenreMap(): Map<String, MangaTag> {
 		val url = "https://$domain/genres"
