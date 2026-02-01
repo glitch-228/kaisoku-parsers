@@ -113,6 +113,7 @@ internal class ReadComicOnline(context: MangaLoaderContext) :
 			MangaTag("45", "Western", source),
 			MangaTag("36", "Zombies", source),
 		)
+
 	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
