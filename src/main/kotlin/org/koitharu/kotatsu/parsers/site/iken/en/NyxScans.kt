@@ -6,6 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.iken.IkenParser
 import org.koitharu.kotatsu.parsers.util.generateUid
+import org.koitharu.kotatsu.parsers.util.parseJson
 import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.src
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
@@ -29,20 +30,56 @@ internal class NyxScans(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		return runCatching { super.getPages(chapter) }.getOrElse { originalError ->
-			val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
-			val images = doc.select(selectPages)
-				.mapNotNull { img -> img.src() }
-				.distinct()
-			if (images.isEmpty()) throw originalError
-			images.map { url ->
-				MangaPage(
-					id = generateUid(url),
-					url = url,
-					preview = null,
-					source = source,
-				)
+		val apiPages = runCatching { parsePagesFromApi(chapter.id) }.getOrElse { error ->
+			if (error.message?.contains("unlock", ignoreCase = true) == true) {
+				throw error
 			}
+			emptyList()
+		}
+		apiPages.takeIf { it.isNotEmpty() }?.let { return it }
+		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
+		if (doc.selectFirst("svg.lucide-lock") != null) {
+			throw Exception("Need to unlock chapter!")
+		}
+		val images = doc.select(selectPages)
+			.mapNotNull { img -> img.src() }
+			.distinct()
+		if (images.isEmpty()) {
+			throw Exception("Chapter images are unavailable")
+		}
+		return images.map { url ->
+			MangaPage(
+				id = generateUid(url),
+				url = url,
+				preview = null,
+				source = source,
+			)
+		}
+	}
+
+	private suspend fun parsePagesFromApi(chapterId: Long): List<MangaPage> {
+		val json = webClient.httpGet("https://$defaultDomain/api/chapter?chapterId=$chapterId").parseJson()
+		val chapter = json.optJSONObject("chapter") ?: return emptyList()
+		if (chapter.optBoolean("isLocked", false)) {
+			throw Exception("Need to unlock chapter!")
+		}
+		val images = chapter.optJSONArray("images")?.mapNotNull { item ->
+			when (item) {
+				is String -> item.takeIf { it.isNotBlank() }
+				is org.json.JSONObject -> item.optString("url")
+					.ifBlank { item.optString("src") }
+					.ifBlank { item.optString("image") }
+					.takeIf { it.isNotBlank() }
+				else -> null
+			}
+		}.orEmpty()
+		return images.map { url ->
+			MangaPage(
+				id = generateUid(url),
+				url = url,
+				preview = null,
+				source = source,
+			)
 		}
 	}
 

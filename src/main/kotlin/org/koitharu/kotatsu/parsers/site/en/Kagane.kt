@@ -641,19 +641,22 @@ internal class Kagane(context: MangaLoaderContext) :
                 val imageResp = chain.proceed(chain.request())
                 if (!imageResp.isSuccessful) return imageResp
 
+                val contentType = imageResp.body?.contentType()
                 val imageBytes = imageResp.body?.bytes() ?: return imageResp
 
                 try {
                     val decrypted = decryptImage(imageBytes, seriesKey, chapterId)
-                        ?: throw Exception("Unable to decrypt data")
-                    val unscrambled = processData(decrypted, index, seriesKey, chapterId)
-                        ?: throw Exception("Unable to unscramble data")
-
+                    val processed = decrypted?.let {
+                        processData(it, index, seriesKey, chapterId)
+                    }
+                    val outputBytes = processed ?: imageBytes
                     return imageResp.newBuilder()
-                        .body(unscrambled.toResponseBody(imageResp.body?.contentType()))
+                        .body(outputBytes.toResponseBody(contentType))
                         .build()
-                } catch (e: Exception) {
-                    return imageResp
+                } catch (_: Exception) {
+                    return imageResp.newBuilder()
+                        .body(imageBytes.toResponseBody(contentType))
+                        .build()
                 }
             }
         }
