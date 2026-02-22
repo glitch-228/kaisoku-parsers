@@ -357,7 +357,9 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 			.sortedBy { it["index"].toSafeInt() }
 			.mapNotNull { pageMap ->
 				val id = pageMap["id"] as? String ?: return@mapNotNull null
-				val imageUrl = (pageMap["image"] as? String)?.ifBlank { null } ?: resolvePageUrl(id)
+				val resolvedImageUrl = resolvePageUrl(id)
+				val fallbackImageUrl = (pageMap["image"] as? String)?.ifBlank { null }
+				val imageUrl = resolvedImageUrl ?: fallbackImageUrl
 					?: return@mapNotNull null
 
 				MangaPage(
