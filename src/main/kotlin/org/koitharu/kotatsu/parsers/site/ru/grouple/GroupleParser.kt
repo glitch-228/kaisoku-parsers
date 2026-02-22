@@ -153,8 +153,9 @@ internal abstract class GroupleParser(
             largeCoverUrl = coverImg?.attrAsAbsoluteUrlOrNull("data-full"),
             coverUrl = manga.coverUrl
                 ?: coverImg?.attrAsAbsoluteUrlOrNull("data-thumb")?.replace("_p.", "."),
-            tags = root.selectFirstOrThrow("div.subject-meta")
-                .getElementsByAttributeValueContaining("href", "/list/genre/").mapTo(manga.tags.toMutableSet()) { a ->
+            tags = root.select("div.subject-meta a[href*=\"/list/genre/\"], .cr-tags__wrapper a[href*=\"/list/genre/\"]")
+                .distinctBy { it.text().toTitleCase() }
+                .mapTo(manga.tags.toMutableSet()) { a ->
                     MangaTag(
                         title = a.text().toTitleCase(),
                         key = a.attr("href").removeSuffix('/').substringAfterLast('/'),
