@@ -32,7 +32,13 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		setFirstPage(0)
 	}
 
-	override val configKeyDomain = ConfigKey.Domain("zenmanga.io", "v1.zenmanga.one", "v1.zenmanga.me")
+	override val configKeyDomain = ConfigKey.Domain(
+		"inkstory.net",
+		"manga.ovh",
+		"zenmanga.io",
+		"v1.zenmanga.one",
+		"v1.zenmanga.me",
+	)
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.POPULARITY,
@@ -55,13 +61,16 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 	override val authUrl: String
 		get() = "https://sso.inuko.me/account/sign-in"
 
-	private val apiDomain = if (domain.startsWith("v1.")) domain.replace("v1.", "api.") else "api.$domain"
+	private val normalizedDomain = normalizeDomain(domain)
+	private val apiDomain = "api.$normalizedDomain"
 
 	private fun checkAuth(): Boolean {
 		val authCookieName = "__otaku_session"
-		return context.cookieJar.getCookies("zenmanga.io").any { it.name == authCookieName } ||
+		return context.cookieJar.getCookies(normalizedDomain).any { it.name == authCookieName } ||
+			context.cookieJar.getCookies("zenmanga.io").any { it.name == authCookieName } ||
 			context.cookieJar.getCookies("v1.zenmanga.one").any { it.name == authCookieName } ||
-			context.cookieJar.getCookies("v1.zenmanga.me").any { it.name == authCookieName }
+			context.cookieJar.getCookies("v1.zenmanga.me").any { it.name == authCookieName } ||
+			context.cookieJar.getCookies("manga.ovh").any { it.name == authCookieName }
 	}
 
 	override suspend fun isAuthorized(): Boolean {
@@ -187,7 +196,7 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		val nameObj = json.getJSONObject("name")
 		val title = nameObj.getStringOrNull("ru") ?: nameObj.getString("en")
 
-		val publicUrl = "https://$domain/content/$slug"
+		val publicUrl = "https://$normalizedDomain/content/$slug"
 
 		val altNames = json.getJSONArray("altNames")
 			.mapJSON { it.getString("name") }
@@ -196,7 +205,7 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		return Manga(
 			id = generateUid(publicUrl),
 			url = "/content/$slug",
-			publicUrl = "https://$domain/content/$slug",
+			publicUrl = publicUrl,
 			title = title,
 			altTitles = altNames,
 			coverUrl = json.getStringOrNull("poster"),
@@ -361,7 +370,7 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 	}
 
 	private suspend fun fetchAstroData(relativeUrl: String): Map<*, *>? {
-		val fullUrl = relativeUrl.toAbsoluteUrl(domain)
+		val fullUrl = relativeUrl.toAbsoluteUrl(normalizedDomain)
 
 		val response = webClient.httpGet(fullUrl)
 
@@ -501,6 +510,20 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 				}
 				else -> item
 			}
+		}
+	}
+
+	private fun normalizeDomain(raw: String): String = when (raw.lowercase(Locale.ROOT)) {
+		"inkstory.net" -> "inkstory.net"
+		"manga.ovh" -> "inkstory.net"
+		"inkstory.me" -> "inkstory.net"
+		"zenmanga.io" -> "inkstory.net"
+		"v1.zenmanga.one" -> "inkstory.net"
+		"v1.zenmanga.me" -> "inkstory.net"
+		else -> if (raw.startsWith("v1.")) {
+			raw.removePrefix("v1.")
+		} else {
+			raw
 		}
 	}
 }
