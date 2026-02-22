@@ -9,7 +9,6 @@ SOURCE_FILTER=""
 SOURCE_SPECS=(
   "upstream|https://github.com/KotatsuApp/kotatsu-parsers.git|master"
   "redo|https://github.com/Kotatsu-Redo/kotatsu-parsers-redo.git|master"
-  "yaka|https://github.com/YakaTeam/kotatsu-parsers.git|master"
 )
 
 log() {
@@ -32,7 +31,7 @@ Options:
   --push                  Push target branch to origin after successful apply.
   --branch <name>         Target branch to sync (default: master).
   --sources <csv>         Comma-separated source remotes to include.
-                          Available: upstream,redo,yaka
+                          Available: upstream,redo
   -h, --help              Show this help.
 EOF
 }
