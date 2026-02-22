@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.site.ru
 
 import okhttp3.Headers
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -335,12 +336,31 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 			.addPathSegment("image")
 			.build()
 
-		val responseText = webClient.httpGet(url).use { it.body?.string() ?: return null }
-		return try {
-			JSONObject(responseText).getString("url")
-		} catch (_: Exception) {
-			null
+		return runCatching {
+			webClient.httpGet(url).use { response ->
+				val responseText = response.body?.string() ?: return null
+				JSONObject(responseText).getStringOrNull("url")
+			}
+		}.getOrNull()
+	}
+
+	private fun normalizePageImageUrl(rawUrl: String): String {
+		val url = rawUrl.toHttpUrlOrNull() ?: return rawUrl
+		if (!url.host.endsWith("inuko.me") || !url.encodedPath.contains("/chapters/")) {
+			return rawUrl
 		}
+
+		val builder = url.newBuilder()
+		if (url.queryParameter("width").isNullOrBlank()) {
+			builder.setQueryParameter("width", "1600")
+		}
+		if (url.queryParameter("type").isNullOrBlank()) {
+			builder.setQueryParameter("type", "webp")
+		}
+		if (url.queryParameter("quality").isNullOrBlank()) {
+			builder.setQueryParameter("quality", "75")
+		}
+		return builder.build().toString()
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
@@ -357,9 +377,12 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 			.sortedBy { it["index"].toSafeInt() }
 			.mapNotNull { pageMap ->
 				val id = pageMap["id"] as? String ?: return@mapNotNull null
-				val resolvedImageUrl = resolvePageUrl(id)
-				val fallbackImageUrl = (pageMap["image"] as? String)?.ifBlank { null }
-				val imageUrl = resolvedImageUrl ?: fallbackImageUrl
+				val imageUrl = (pageMap["image"] as? String)
+					?.ifBlank { null }
+					?.let(::normalizePageImageUrl)
+					?: resolvePageUrl(id)
+						?.ifBlank { null }
+						?.let(::normalizePageImageUrl)
 					?: return@mapNotNull null
 
 				MangaPage(
