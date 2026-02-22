@@ -9,6 +9,8 @@ import org.koitharu.kotatsu.parsers.bitmap.Bitmap
 import org.koitharu.kotatsu.parsers.config.MangaSourceConfig
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.model.MangaSource
+import org.koitharu.kotatsu.parsers.webview.InterceptedRequest
+import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
 import org.koitharu.kotatsu.parsers.util.LinkResolver
 import java.util.*
 
@@ -44,7 +46,7 @@ public abstract class MangaLoaderContext {
 	 * @param baseUrl url of page script will be executed in context of
 	 * @return execution result as string, may be null
 	 */
-	public abstract suspend fun evaluateJs(baseUrl: String, script: String): String?
+	public abstract suspend fun evaluateJs(baseUrl: String, script: String, timeout: Long): String?
 
 	/**
 	 * Open [url] in browser for some external action (e.g. captcha solving or non cookie-based authorization)
@@ -75,4 +77,70 @@ public abstract class MangaLoaderContext {
 		width: Int,
 		height: Int,
 	): Bitmap
+
+    /**
+     * Intercept WebView requests with custom filtering logic
+     * Loads the specified URL in a WebView and captures HTTP requests that match the filter criteria.
+     *
+     * @param url The URL to load in the WebView
+     * @param interceptorScript JavaScript code that returns true/false for requests to capture
+     * @param timeout Maximum time to wait for requests (milliseconds)
+     * @return List of intercepted requests matching the filter criteria
+     */
+    public open suspend fun interceptWebViewRequests(
+        url: String,
+        interceptorScript: String,
+        timeout: Long = 30000L
+    ): List<InterceptedRequest> {
+        throw UnsupportedOperationException("WebView request interception is not available")
+    }
+
+    /**
+     * Intercept WebView requests with advanced configuration
+     * Loads the specified URL in a WebView and captures HTTP requests that match the filter criteria.
+     * Supports separate page script injection and request filtering.
+     *
+     * @param url The URL to load in the WebView
+     * @param config Configuration including page script, filter script, timeout, etc.
+     * @return List of intercepted requests matching the filter criteria
+     */
+    public open suspend fun interceptWebViewRequests(
+        url: String,
+        config: InterceptionConfig
+    ): List<InterceptedRequest> {
+        // Fallback to the simple version for backward compatibility
+        val script = config.filterScript ?: "return true;"
+        return interceptWebViewRequests(url, script, config.timeoutMs)
+    }
+
+    /**
+     * Simplified API for capturing WebView URLs matching a pattern
+     *
+     * @param pageUrl The URL to load in the WebView
+     * @param urlPattern Regex pattern to match against request URLs
+     * @param timeout Maximum time to wait for requests (milliseconds)
+     * @return List of URLs that matched the pattern
+     */
+    public open suspend fun captureWebViewUrls(
+        pageUrl: String,
+        urlPattern: Regex,
+        timeout: Long = 30000L
+    ): List<String> {
+        throw UnsupportedOperationException("WebView URL capture is not available")
+    }
+
+    /**
+     * Extract VRF (Verification Response Format) token from MangaFire-style AJAX requests
+     * Loads the page and captures AJAX requests containing VRF parameters.
+     *
+     * @param pageUrl The manga page URL to load
+     * @param timeout Maximum time to wait for VRF token (milliseconds)
+     * @return The extracted VRF token, or null if not found
+     */
+    public open suspend fun extractVrfToken(
+        pageUrl: String,
+        timeout: Long = 15000L
+    ): String? {
+        throw UnsupportedOperationException("VRF token extraction is not available")
+    }
 }

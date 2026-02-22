@@ -39,8 +39,9 @@ internal class SussyScan(context: MangaLoaderContext) : PagedMangaParser(
 	searchPageSize = 15,
 ) {
 	override val configKeyDomain = ConfigKey.Domain("sussytoons.wtf")
-	private val apiUrl = "https://api.sussytoons.wtf"
+	private val apiUrl = "https://api2.sussytoons.wtf"
 	private val cdnUrl = "https://cdn.sussytoons.site"
+	private val coverCdnUrl = "https://api2.sussytoons.wtf/cdn"
 	private val scanId = 1
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -114,30 +115,40 @@ internal class SussyScan(context: MangaLoaderContext) : PagedMangaParser(
 					.addQueryParameter("gen_id", genId)
 					.build()
 			}
-			// Default to updated
+			// Default to updated using search endpoint
 			else -> {
-				"$apiUrl/obras/novos-capitulos".toHttpUrl().newBuilder()
-					.addQueryParameter("limite", pageSize.toString())
+				"$apiUrl/obras/search".toHttpUrl().newBuilder()
 					.addQueryParameter("pagina", page.toString())
-					.addQueryParameter("gen_id", genId)
+					.addQueryParameter("limite", pageSize.toString())
+					.addQueryParameter("todos_generos", "1")
+					.addQueryParameter("orderBy", "ultima_atualizacao")
+					.addQueryParameter("orderDirection", "DESC")
 					.build()
 			}
 		}
 
 		val response = webClient.httpGet(url, apiHeaders).parseJson()
-		val results = response.optJSONArray("resultados") ?: return emptyList()
+		val results = response.optJSONArray("obras") ?: response.optJSONArray("resultados") ?: return emptyList()
 		return results.mapJSON { parseMangaFromJson(it) }
 	}
 
 	private fun buildSearchUrl(page: Int, filter: MangaListFilter): HttpUrl {
-		val builder = "$apiUrl/obras".toHttpUrl().newBuilder()
+		val builder = "$apiUrl/obras/search".toHttpUrl().newBuilder()
 			.addQueryParameter("obr_nome", filter.query ?: "")
 			.addQueryParameter("limite", "15")
 			.addQueryParameter("pagina", page.toString())
 
 		val isHentai = filter.types.firstOrNull() == ContentType.HENTAI
 
-		if (isHentai) builder.addQueryParameter("gen_id", "5") else builder.addQueryParameter("todos_generos", "true")
+		if (isHentai) {
+			builder.addQueryParameter("gen_id", "5")
+		} else {
+			builder.addQueryParameter("todos_generos", "1")
+		}
+
+		// Add default ordering for search
+		builder.addQueryParameter("orderBy", "ultima_atualizacao")
+		builder.addQueryParameter("orderDirection", "DESC")
 
 		// Add tags
 		filter.tags.forEach { tag ->
@@ -176,13 +187,13 @@ internal class SussyScan(context: MangaLoaderContext) : PagedMangaParser(
 		val slug = json.optString("obr_slug", "").ifEmpty {
 			name.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
 		}
-		val coverPath = json.optString("obr_imagem", "")
+		val coverPath = json.optString("obr_imagem", "").takeIf { it != "null" && it.isNotEmpty() } ?: ""
 
 		val coverUrl = when {
+			coverPath.isEmpty() -> null
 			coverPath.startsWith("http") -> coverPath
-			coverPath.startsWith("wp-content") -> "$cdnUrl/$coverPath"
-			coverPath.isNotEmpty() -> "$cdnUrl/scans/$scanId/obras/$id/$coverPath"
-			else -> ""
+			coverPath.startsWith("wp-content") -> "$coverCdnUrl/$coverPath"
+			else -> "$coverCdnUrl/scans/$scanId/obras/$id/$coverPath"
 		}
 
 		val isNsfw = json.optBoolean("obr_mais_18", false)
@@ -210,7 +221,16 @@ internal class SussyScan(context: MangaLoaderContext) : PagedMangaParser(
 	override suspend fun getDetails(manga: Manga): Manga {
 		val mangaId = manga.url.substringAfter("/obra/").substringBefore("/")
 		val response = webClient.httpGet("$apiUrl/obras/$mangaId", apiHeaders).parseJson()
-		val mangaJson = response.optJSONObject("resultado") ?: throw Exception("Manga not found")
+
+		// Try to get manga data from "resultado" key first, then fallback to root response
+		val mangaJson = response.optJSONObject("resultado") ?: run {
+			// Check if the response itself contains manga data (has obr_id)
+			if (response.has("obr_id")) {
+				response
+			} else {
+				throw Exception("Manga not found")
+			}
+		}
 
 		val description = mangaJson.optString("obr_descricao")
 			.replace(Regex("</?strong>"), "")
@@ -233,7 +253,7 @@ internal class SussyScan(context: MangaLoaderContext) : PagedMangaParser(
 
 		val chapters = mangaJson.optJSONArray("capitulos")?.mapJSON { chapterJson ->
 			parseChapter(chapterJson)
-		}?.asReversed() ?: emptyList()
+		} ?: emptyList()
 
 		return manga.copy(
 			title = mangaJson.optString("obr_nome", manga.title),
@@ -283,56 +303,37 @@ internal class SussyScan(context: MangaLoaderContext) : PagedMangaParser(
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val chapterId = chapter.url.substringAfter("/capitulo/")
 
-		val pageHeaders = apiHeaders.newBuilder()
-			.build()
-
 		// Fetch chapter data from API
-		val apiPath = "c9812736812/$chapterId"
-		val response = webClient.httpGet("$apiUrl/$apiPath", pageHeaders).parseJson()
-		val chapterData = response.optJSONObject("resultado") ?: throw Exception("Chapter data not found")
+		val chapterData = webClient.httpGet("$apiUrl/capitulos/$chapterId", apiHeaders).parseJson()
 
 		// Parse pages from the response
 		val pagesArray = chapterData.optJSONArray("cap_paginas")
-			?: chapterData.optJSONArray("paginas")
 			?: throw Exception("No pages found in chapter")
 
-		val mangaId = chapterData.optJSONObject("obra")?.optInt("obr_id")
-			?: throw Exception("Manga ID not found")
-
-		val chapterNumber = chapterData.optDouble("cap_numero").let { num ->
-			when {
-				num > 0 -> {
-					if (num % 1 == 0.0) num.toInt().toString() else num.toString().replace(".", "_")
-				}
-
-				else -> {
-					chapterData.optString("cap_nome", "")
-						.substringAfter("Capítulo ", "")
-						.substringBefore(" ")
-						.replace(",", ".")
-						.replace(".", "_")
-						.ifEmpty { "0" }
-				}
-			}
-		}
-
 		return pagesArray.mapJSONNotNull { pageJson ->
+			val pagePath = pageJson.optString("path")
 			val pageSrc = pageJson.optString("src")
 
-			if (pageSrc.isEmpty()) return@mapJSONNotNull null
+			if (pagePath.isEmpty() && pageSrc.isEmpty()) return@mapJSONNotNull null
 
 			val imageUrl = when {
 				// Already a full URL
 				pageSrc.startsWith("http") -> pageSrc
+				// Path contains full file path (has file extension)
+				pagePath.isNotEmpty() && (pagePath.contains(".jpg") || pagePath.contains(".png") || pagePath.contains(".webp") || pagePath.contains(".jpeg")) -> {
+					"$cdnUrl/$pagePath"
+				}
+				// Path is directory path, combine with src
+				pagePath.isNotEmpty() && pageSrc.isNotEmpty() -> {
+					val cleanPath = pagePath.removePrefix("/")
+					"$cdnUrl/$cleanPath/$pageSrc"
+				}
 				// WordPress manga path, looks like: "manga_.../hash/001.webp"
 				pageSrc.startsWith("manga_") -> "$cdnUrl/wp-content/uploads/WP-manga/data/$pageSrc"
 				// WordPress legacy path: "wp-content/uploads/..."
 				pageSrc.startsWith("wp-content") -> "$cdnUrl/$pageSrc"
-				// Simple filename (like "001.webp")
-				else -> {
-					val safeChapterNumber = chapterNumber.replace(".", "_")
-					"$cdnUrl/scans/$scanId/obras/$mangaId/capitulos/$safeChapterNumber/$pageSrc"
-				}
+				// Fallback to src
+				else -> "$cdnUrl/$pageSrc"
 			}
 
 			MangaPage(

@@ -6,14 +6,13 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@MangaSourceParser("KIRYUU", "Kiryuu", "id")
-internal class KiryuuParser(context: MangaLoaderContext) :
-	MangaReaderParser(context, MangaParserSource.KIRYUU, "kiryuu02.com", pageSize = 50, searchPageSize = 10) {
-
-	override val listUrl = "/manga/"
+@MangaSourceParser("SASANGEYOU", "Sasangeyou", "id")
+internal class Sasangeyou(context: MangaLoaderContext) :
+	MangaReaderParser(context, MangaParserSource.SASANGEYOU, "sasangeyou.net", pageSize = 25, searchPageSize = 10) {
 
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = super.filterCapabilities.copy(
 			isTagsExclusionSupported = false,
 		)
-}
+  }
+  

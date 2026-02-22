@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.site.all
 
 import androidx.collection.ArrayMap
 import kotlinx.coroutines.coroutineScope
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -13,6 +14,7 @@ import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.*
 
+@Broken
 @MangaSourceParser("MANGAPARK", "MangaPark")
 internal class MangaPark(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.MANGAPARK, pageSize = 36) {
@@ -297,7 +299,12 @@ internal class MangaPark(context: MangaLoaderContext) :
 		return Regex("\"(https?:.+?)\"")
 			.findAll(script)
 			.mapIndexedNotNullTo(ArrayList()) { i, it ->
-				val url = it.groupValues.getOrNull(1) ?: return@mapIndexedNotNullTo null
+				var url = it.groupValues.getOrNull(1) ?: return@mapIndexedNotNullTo null
+                if (url.indexOf("//s") != -1 && url.indexOf(".") != -1){
+                    var p = url.split("//")[1]
+                    p = p.substring(p.indexOf("/"))
+                    url = "https://$domain$p"
+                }
 				if (url.contains(".jpg") || url.contains(".jpeg") || url.contains(".jfif") || url.contains(".pjpeg") ||
 					url.contains(".pjp") || url.contains(".png") || url.contains(".webp") || url.contains(".avif") ||
 					url.contains(".gif")

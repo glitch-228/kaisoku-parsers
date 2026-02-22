@@ -1,6 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.fr
 
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -32,7 +33,7 @@ import java.util.EnumSet
 internal class AnimeSama(context: MangaLoaderContext) :
 	PagedMangaParser(context, source = MangaParserSource.ANIMESAMA, 96) {
 
-	override val configKeyDomain = ConfigKey.Domain("anime-sama.fr")
+	override val configKeyDomain = ConfigKey.Domain("anime-sama.eu")
 	private val baseUrl = "https://$domain"
 	private val cdnUrl = "$baseUrl/s2/scans/"
 
@@ -53,9 +54,10 @@ internal class AnimeSama(context: MangaLoaderContext) :
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions {
 		val doc = webClient.httpGet("$baseUrl/catalogue").parseHtml()
-		val genres = doc.select("#list_genres label").mapNotNull { labelElement ->
-			val input = labelElement.selectFirst("input[name=genre[]]") ?: return@mapNotNull null
-			val labelText = labelElement.ownText()
+		val genres = doc.select("#genreList label.filter-checkbox-item").mapNotNull { labelElement ->
+			val input = labelElement.selectFirst("input.filter-checkbox[name=\"genre[]\"]") ?: return@mapNotNull null
+			val spanElement = labelElement.selectFirst("span") ?: return@mapNotNull null
+			val labelText = spanElement.text()
 			val value = input.attr("value")
 			MangaTag(
 				key = value,
@@ -72,40 +74,34 @@ internal class AnimeSama(context: MangaLoaderContext) :
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val url = buildListUrl(page, order, filter)
 		val doc = webClient.httpGet(url).parseHtml()
-
-		return if (url.toString() == "$baseUrl/") {
-			parseHomePageScans(doc)
-		} else {
-			parseCataloguePage(doc)
-		}
+		return parseCataloguePage(doc)
 	}
 
-	private fun buildListUrl(page: Int, order: SortOrder, filter: MangaListFilter) = when {
-		filter.query.isNullOrEmpty().not() || filter.tags.isNotEmpty() -> {
-			"$baseUrl/catalogue".toHttpUrl().newBuilder()
-				.addQueryParameter("type[0]", "Scans")
-				.apply {
-					filter.query?.let { addQueryParameter("search", it) }
-					filter.tags.forEach { tag ->
-						addQueryParameter("genre[]", tag.key)
-					}
-				}
-				.addQueryParameter("page", page.toString())
-				.build()
-		}
+	private fun buildListUrl(page: Int, order: SortOrder, filter: MangaListFilter): HttpUrl {
+		return "$baseUrl/catalogue".toHttpUrl().newBuilder()
+			.addQueryParameter("type[]", "Scans")
+			.apply {
+				// Add search parameter (empty if no query)
+				addQueryParameter("search", filter.query ?: "")
 
-		order == SortOrder.UPDATED && page == 1 -> baseUrl.toHttpUrl()
-		else -> "$baseUrl/catalogue".toHttpUrl().newBuilder()
-			.addQueryParameter("type[0]", "Scans")
-			.addQueryParameter("page", page.toString())
+				// Add genre filters
+				filter.tags.forEach { tag ->
+					addQueryParameter("genre[]", tag.key)
+				}
+
+				// Add page parameter (only if not page 1)
+				if (page > 1) {
+					addQueryParameter("page", page.toString())
+				}
+			}
 			.build()
 	}
 
 	private fun parseCataloguePage(doc: Document): List<Manga> {
-		return doc.select("#list_catalog > div").mapNotNull { element ->
+		return doc.select("div.catalog-card").mapNotNull { element ->
 			val a = element.selectFirst("a") ?: return@mapNotNull null
-			val title = element.selectFirst("h1")?.text() ?: return@mapNotNull null
-			val cover = element.selectFirst("img")?.attr("src") ?: return@mapNotNull null
+			val title = element.selectFirst("h2.card-title")?.text() ?: return@mapNotNull null
+			val cover = element.selectFirst("img.card-image")?.attr("src") ?: return@mapNotNull null
 			val href = a.attr("href").removeSuffix("/")
 
 			createManga(
