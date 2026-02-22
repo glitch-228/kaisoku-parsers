@@ -344,28 +344,56 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		}.getOrNull()
 	}
 
-	private fun normalizePageImageUrl(rawUrl: String): String {
-		val url = rawUrl.toHttpUrlOrNull() ?: return rawUrl
-		if (!url.host.endsWith("inuko.me") || !url.encodedPath.contains("/chapters/")) {
+	private fun normalizePageImageUrl(rawUrl: String, secretKey: String?): String {
+		val originalUrl = rawUrl.toHttpUrlOrNull() ?: return rawUrl
+		if (!originalUrl.host.endsWith("inuko.me") || !originalUrl.encodedPath.contains("/chapters/")) {
 			return rawUrl
 		}
 
-		val builder = url.newBuilder()
-		if (url.queryParameter("width").isNullOrBlank()) {
+		val builder = originalUrl.newBuilder()
+
+		val lastSegment = originalUrl.pathSegments.lastOrNull()
+		val encryptedMode = when {
+			lastSegment.isNullOrBlank() -> null
+			else -> {
+				val dot = lastSegment.lastIndexOf('.')
+				val name = if (dot >= 0) lastSegment.substring(0, dot) else lastSegment
+				val extension = if (dot >= 0) lastSegment.substring(dot) else ""
+				if (name.length == 36) {
+					when (name[14]) {
+						'x' -> "xor"
+						's' -> {
+							val rewrittenName = name.replaceRange(14, 15, "x") + extension
+							builder.setPathSegment(originalUrl.pathSize - 1, rewrittenName)
+							"xor"
+						}
+						else -> null
+					}
+				} else null
+			}
+		}
+
+		if (originalUrl.queryParameter("width").isNullOrBlank()) {
 			builder.setQueryParameter("width", "1600")
 		}
-		if (url.queryParameter("type").isNullOrBlank()) {
+		if (originalUrl.queryParameter("type").isNullOrBlank()) {
 			builder.setQueryParameter("type", "webp")
 		}
-		if (url.queryParameter("quality").isNullOrBlank()) {
+		if (originalUrl.queryParameter("quality").isNullOrBlank()) {
 			builder.setQueryParameter("quality", "75")
 		}
+
+		if (encryptedMode == "xor" && !secretKey.isNullOrBlank()) {
+			builder.fragment("ik=xor:$secretKey")
+		}
+
 		return builder.build().toString()
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val data = fetchAstroData(chapter.url)
 			?: throw ParseException("Не удалось получить Astro JSON для страниц главы", chapter.url)
+		val secretKey = (data["secret-key"] as? String)?.ifBlank { null }
 
 		val chapterData = data["reader-current-chapter"] as? Map<*, *>
 			?: throw ParseException("Ключ 'reader-current-chapter' не найден", chapter.url)
@@ -379,10 +407,10 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 				val id = pageMap["id"] as? String ?: return@mapNotNull null
 				val imageUrl = (pageMap["image"] as? String)
 					?.ifBlank { null }
-					?.let(::normalizePageImageUrl)
+					?.let { normalizePageImageUrl(it, secretKey) }
 					?: resolvePageUrl(id)
 						?.ifBlank { null }
-						?.let(::normalizePageImageUrl)
+						?.let { normalizePageImageUrl(it, secretKey) }
 					?: return@mapNotNull null
 
 				MangaPage(
