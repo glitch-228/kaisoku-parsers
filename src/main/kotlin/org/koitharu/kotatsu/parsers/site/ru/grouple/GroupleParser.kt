@@ -142,6 +142,11 @@ internal abstract class GroupleParser(
         val hashRegex = Regex("window.user_hash\\s*=\\s*\'([^\']+)\'")
         val userHash = doc.select("script").firstNotNullOfOrNull { it.html().findGroupValue(hashRegex) }
         val hasNsfwAlert = root.select(".alert-warning").any { it.ownText().contains(NSFW_ALERT) }
+        val description = root.selectFirst(
+            "div.manga-description, " +
+                "div.cr-description__content[itemprop=\"description\"], " +
+                "#main-info-tab div.cr-description__content[itemprop=\"description\"]",
+        )?.html()
         return manga.copy(
             source = newSource,
             title = doc.metaValue("name") ?: manga.title,
@@ -149,7 +154,7 @@ internal abstract class GroupleParser(
                 it.textOrNull()
             } ?: manga.altTitles,
             publicUrl = response.request.url.toString(),
-            description = root.selectFirst("div.manga-description")?.html(),
+            description = description,
             largeCoverUrl = coverImg?.attrAsAbsoluteUrlOrNull("data-full"),
             coverUrl = manga.coverUrl
                 ?: coverImg?.attrAsAbsoluteUrlOrNull("data-thumb")?.replace("_p.", "."),
