@@ -4,10 +4,13 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.ContentRating
 import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.Manga
@@ -35,11 +38,15 @@ import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import org.koitharu.kotatsu.parsers.util.toRelativeUrl
 import java.text.SimpleDateFormat
 import java.util.EnumSet
+import java.util.LinkedHashSet
 import java.util.Locale
 
 @MangaSourceParser("YOMUMANGAS", "Yomu Mangas", "pt")
 internal class YomuMangas(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.YOMUMANGAS, pageSize = 18) {
+
+	@Volatile
+	private var genreIndex: Map<String, MangaTag> = emptyMap()
 
 	override val configKeyDomain = ConfigKey.Domain("yomumangas.com")
 
@@ -58,8 +65,8 @@ internal class YomuMangas(context: MangaLoaderContext) :
 		.build()
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
-		SortOrder.POPULARITY,
 		SortOrder.UPDATED,
+		SortOrder.POPULARITY,
 		SortOrder.NEWEST,
 		SortOrder.ALPHABETICAL_DESC,
 	)
@@ -90,14 +97,11 @@ internal class YomuMangas(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		if (order == SortOrder.UPDATED && filter.isEmpty()) {
-			return if (page == 1) parseLatestHomepage() else emptyList()
-		}
-
+		val effectiveOrderBy = if (filter.isEmpty()) "updatedAt" else order.toApiOrderBy()
 		val url = "$apiUrl/mangas".toHttpUrl().newBuilder().apply {
 			addQueryParameter("query", filter.query.orEmpty())
 			addQueryParameter("page", page.toString())
-			addQueryParameter("orderBy", order.toApiOrderBy())
+			addQueryParameter("orderBy", effectiveOrderBy)
 
 			if (filter.tags.isNotEmpty()) {
 				addQueryParameter("genreIds", filter.tags.joinToString(",") { it.key })
@@ -127,8 +131,8 @@ internal class YomuMangas(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val detailsPath = manga.url.substringBeforeLast("/", manga.url)
-		val response = webClient.httpGet("$apiUrl$detailsPath", getApiHeaders()).parseJson()
+		val mangaApiId = extractMangaApiId(manga)
+		val response = webClient.httpGet("$apiUrl/mangas/$mangaApiId", getApiHeaders()).parseJson()
 		val series = response.optJSONObject("manga") ?: response
 		val parsed = parseMangaFromSeries(series, fallbackUrl = manga.url) ?: manga
 		val chapters = fetchChapters(series)
@@ -144,48 +148,131 @@ internal class YomuMangas(context: MangaLoaderContext) :
 			tags = if (parsed.tags.isNotEmpty()) parsed.tags else manga.tags,
 			authors = if (parsed.authors.isNotEmpty()) parsed.authors else manga.authors,
 			state = parsed.state ?: manga.state,
-			contentRating = parsed.contentRating ?: manga.contentRating,
+			contentRating = parsed.contentRating,
 			chapters = chapters,
 		)
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain), getRequestHeaders()).parseHtml()
-		return doc.select("[class*=reader_Pages] img").mapNotNull { img ->
-			val url = img.src()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+		val chapterUrl = chapter.url.toAbsoluteUrl(domain)
+
+		val httpDoc = webClient.httpGet(chapterUrl, getRequestHeaders()).parseHtml()
+		val httpPages = parsePagesFromDocument(httpDoc)
+		if (httpPages.isNotEmpty()) {
+			return httpPages
+		}
+
+		if (isCloudflareChallenge(httpDoc)) {
+			context.requestBrowserAction(this, chapterUrl)
+		}
+
+		val jsHtml = loadChapterHtmlViaJs(chapterUrl)
+		if (jsHtml != null) {
+			if (isCloudflareChallenge(jsHtml)) {
+				context.requestBrowserAction(this, chapterUrl)
+			}
+
+			val jsDoc = Jsoup.parse(jsHtml, chapterUrl)
+			val jsPages = parsePagesFromDocument(jsDoc)
+			if (jsPages.isNotEmpty()) {
+				return jsPages
+			}
+		}
+
+		throw ParseException("Cannot find chapter pages", chapterUrl)
+	}
+
+	private fun parsePagesFromDocument(doc: Document): List<MangaPage> {
+		val images = doc.select(
+			"ul[class*=styles_Pages] li[data-type=page] img[src], " +
+				"li[id^=page-] img[src], " +
+				"[class*=reader_Pages] img[src]",
+		)
+		return images.mapNotNull { img ->
+			val pageUrl = img.src()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
 			MangaPage(
-				id = generateUid(url),
-				url = url.toRelativeUrl(domain),
+				id = generateUid(pageUrl),
+				url = pageUrl.toRelativeUrl(domain),
 				preview = null,
 				source = source,
 			)
 		}
 	}
 
-	private suspend fun parseLatestHomepage(): List<Manga> {
-		val doc = webClient.httpGet("https://$domain", getRequestHeaders()).parseHtml()
-		return doc.select("[class*=styles_Container]:has(h1:contains(capítulos)) [class*=styles_Card]").mapNotNull { card ->
-			val a = card.selectFirst("a[class*=styles_Title], a[href]") ?: return@mapNotNull null
-			val href = a.attr("href")
-				.takeIf { it.isNotBlank() }
-				?.toRelativeUrl(domain)
-				?: return@mapNotNull null
-			val title = a.text().trim().ifEmpty { return@mapNotNull null }
-			Manga(
-				id = generateUid(href),
-				url = href,
-				publicUrl = href.toAbsoluteUrl(domain),
-				title = title,
-				altTitles = emptySet(),
-				rating = RATING_UNKNOWN,
-				contentRating = null,
-				coverUrl = card.selectFirst("img")?.src(),
-				tags = emptySet(),
-				state = null,
-				authors = emptySet(),
-				source = source,
-			)
+	private suspend fun loadChapterHtmlViaJs(chapterUrl: String): String? {
+		val script = """
+			(() => {
+				return new Promise(resolve => {
+					const challengeDetected = () => {
+						const hasChallengeScript = document.querySelector('script[src*="challenge-platform"]') !== null;
+						const hasChallengeTitle = document.getElementById('challenge-error-title') !== null;
+						const hasChallengeText = document.getElementById('challenge-error-text') !== null;
+						const hasChallengeForm = document.querySelector('form[action*="__cf_chl"]') !== null;
+						const root = document.documentElement;
+						const lower = ((root && root.innerText) || '').toLowerCase();
+						const hasChallengeTextSignal =
+							(lower.includes('just a moment') && lower.includes('cloudflare')) ||
+							(lower.includes('checking your browser') && lower.includes('cloudflare')) ||
+							lower.includes('cf-chl-opt');
+						return hasChallengeScript || hasChallengeTitle || hasChallengeText || hasChallengeForm || hasChallengeTextSignal;
+					};
+
+					const hasPages = () =>
+						document.querySelector('ul[class*=styles_Pages] li[data-type="page"] img[src], li[id^="page-"] img[src], [class*=reader_Pages] img[src]') !== null;
+
+					const finish = () => resolve(document.documentElement ? document.documentElement.outerHTML : "");
+
+					if (challengeDetected() || hasPages()) {
+						return finish();
+					}
+
+					let attempts = 0;
+					const maxAttempts = 80;
+					const timer = setInterval(() => {
+						attempts += 1;
+						if (challengeDetected() || hasPages() || attempts >= maxAttempts) {
+							clearInterval(timer);
+							finish();
+						}
+					}, 250);
+				});
+			})()
+		""".trimIndent()
+
+		val raw = context.evaluateJs(chapterUrl, script, timeout = 30000L) ?: return null
+		return decodeEvaluateJsHtml(raw)
+	}
+
+	private fun decodeEvaluateJsHtml(raw: String): String {
+		val value = raw.trim()
+		if (value.length >= 2 && value.first() == '"' && value.last() == '"') {
+			val unescaped = value.substring(1, value.length - 1)
+				.replace("\\\\", "\\")
+				.replace("\\\"", "\"")
+				.replace("\\n", "\n")
+				.replace("\\r", "\r")
+				.replace("\\t", "\t")
+			return unescaped.replace(Regex("""\\u([0-9a-fA-F]{4})""")) { m ->
+				m.groupValues[1].toInt(16).toChar().toString()
+			}
 		}
+		return value
+	}
+
+	private fun isCloudflareChallenge(doc: Document): Boolean {
+		if (doc.selectFirst("script[src*=challenge-platform]") != null) return true
+		if (doc.getElementById("challenge-error-title") != null) return true
+		if (doc.getElementById("challenge-error-text") != null) return true
+		if (doc.selectFirst("form[action*=__cf_chl]") != null) return true
+		return isCloudflareChallenge(doc.outerHtml())
+	}
+
+	private fun isCloudflareChallenge(html: String): Boolean {
+		val lower = html.lowercase(Locale.ROOT)
+		return (lower.contains("just a moment") && lower.contains("cloudflare")) ||
+			(lower.contains("checking your browser") && lower.contains("cloudflare")) ||
+			lower.contains("cf-chl-opt") ||
+			lower.contains("cf-browser-verification")
 	}
 
 	private suspend fun fetchChapters(series: JSONObject): List<MangaChapter> {
@@ -228,7 +315,7 @@ internal class YomuMangas(context: MangaLoaderContext) :
 				branch = null,
 				source = source,
 			)
-		}.sortedByDescending { it.number }
+		}.sortedBy { it.number }
 	}
 
 	private fun resolveChapterUrl(
@@ -237,26 +324,28 @@ internal class YomuMangas(context: MangaLoaderContext) :
 		seriesId: Int,
 		seriesUrl: String?,
 	): String? {
-		val direct = normalizeMangaUrl(
-			chapter.getStringOrNull("url")
-				?: chapter.getStringOrNull("path")
-				?: chapter.getStringOrNull("chapterUrl"),
-		)
-		if (!direct.isNullOrBlank()) {
-			return direct
-		}
+		val normalizedSlug = seriesSlug
+			?.trim()
+			?.takeIf { it.isNotBlank() }
+			?: seriesUrl
+				?.substringAfter("/mangas/", "")
+				?.split('/')
+				?.getOrNull(1)
+				?.trim()
+				?.takeIf { it.isNotBlank() }
+			?: return null
 
-		val chapterSlug = chapter.getStringOrNull("slug")
-		if (!chapterSlug.isNullOrBlank() && !seriesSlug.isNullOrBlank()) {
-			return "/mangas/$seriesSlug/$seriesId/$chapterSlug"
-		}
+		val chapterSegment = chapter.opt("chapter")?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+			?: chapter.optString("number").trim().takeIf { it.isNotEmpty() }
+			?: chapter.optString("slug").trim().takeIf { it.isNotEmpty() }
+			?: chapter.opt("id")?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+			?: return null
 
-		val chapterId = chapter.optInt("id", 0)
-		if (chapterId > 0 && !seriesSlug.isNullOrBlank()) {
-			return "/mangas/$seriesSlug/$seriesId/$chapterId"
-		}
+		val normalizedChapter = chapterSegment
+			.replace(',', '.')
+			.removeSuffix(".0")
 
-		return seriesUrl?.takeIf { it.isNotBlank() }
+		return "/mangas/$seriesId/$normalizedSlug/$normalizedChapter"
 	}
 
 	private suspend fun fetchAvailableTags(): Set<MangaTag> {
@@ -266,6 +355,7 @@ internal class YomuMangas(context: MangaLoaderContext) :
 		if (fromArray != null) {
 			val tags = parseTagsArray(fromArray)
 			if (tags.isNotEmpty()) {
+				genreIndex = tags.associateBy { it.key }
 				return tags
 			}
 		}
@@ -276,6 +366,7 @@ internal class YomuMangas(context: MangaLoaderContext) :
 		if (fromObject != null) {
 			val tags = parseTagsArray(fromObject.optJSONArray("genres") ?: fromObject.optJSONArray("data") ?: JSONArray())
 			if (tags.isNotEmpty()) {
+				genreIndex = tags.associateBy { it.key }
 				return tags
 			}
 		}
@@ -302,48 +393,44 @@ internal class YomuMangas(context: MangaLoaderContext) :
 	private fun parseMangaFromSeries(series: JSONObject, fallbackUrl: String? = null): Manga? {
 		val id = series.getLongOrDefault("id", 0L)
 		val slug = series.getStringOrNull("slug")
-		val url = normalizeMangaUrl(
-			series.getStringOrNull("url")
-				?: series.getStringOrNull("path")
-				?: slug?.let { s ->
-					val suffix = if (id > 0L) "/$id" else ""
-					"/mangas/$s$suffix"
-				}
-				?: fallbackUrl,
-		) ?: return null
+		val url = when {
+			id > 0L && !slug.isNullOrBlank() -> "/mangas/$id/$slug"
+			else -> normalizeMangaUrl(
+				series.getStringOrNull("url")
+					?: series.getStringOrNull("path")
+					?: fallbackUrl,
+			) ?: return null
+		}
 
-		val tags = series.optJSONArray("genres")?.mapJSONNotNull { genre ->
-			val key = genre.opt("id")?.toString()?.trim().orEmpty()
-			val title = genre.getStringOrNull("name")
-			if (key.isBlank() || title.isNullOrBlank()) {
-				null
-			} else {
-				MangaTag(
-					key = key,
-					title = title,
-					source = source,
-				)
-			}
-		}?.toSet().orEmpty()
+		val tags = parseSeriesTags(series)
 
 		val author = series.getStringOrNull("author")
 		val artist = series.getStringOrNull("artist")
+		val authors = LinkedHashSet<String>(8).apply {
+			addAll(parsePeopleArray(series.optJSONArray("authors")))
+			addAll(parsePeopleArray(series.optJSONArray("artists")))
+			author?.let(::add)
+			artist?.let(::add)
+		}.filter { it.isNotBlank() }.toSet()
 
 		val description = series.getStringOrNull("description")
 			?: series.getStringOrNull("synopsis")
 			?: series.getStringOrNull("postContent")
 
-		val cover = series.getStringOrNull("thumbnail")
+		val cover = parseAssetUrl(
+			series.getStringOrNull("thumbnail")
 			?: series.getStringOrNull("featuredImage")
 			?: series.getStringOrNull("cover")
 			?: series.getStringOrNull("poster")
+			?: series.getStringOrNull("banner"),
+		)
 
 		val status = (series.getStringOrNull("seriesStatus")
 			?: series.getStringOrNull("status"))
 			?.uppercase(Locale.ROOT)
 
 		val isAdult = series.getBooleanOrDefault("nsfw", false) ||
-			series.getBooleanOrDefault("adult", false)
+			series.getBooleanOrDefault("hentai", false)
 
 		return Manga(
 			id = if (id > 0L) id else generateUid(url),
@@ -360,11 +447,11 @@ internal class YomuMangas(context: MangaLoaderContext) :
 			description = description,
 			rating = RATING_UNKNOWN,
 			tags = tags,
-			authors = setOfNotNull(author, artist),
+			authors = authors,
 			state = when (status) {
 				"ONGOING" -> MangaState.ONGOING
 				"HIATUS" -> MangaState.PAUSED
-				"COMPLETED" -> MangaState.FINISHED
+				"COMPLETED", "COMPLETE", "FINISHED" -> MangaState.FINISHED
 				"DROPPED", "CANCELLED" -> MangaState.ABANDONED
 				"COMING_SOON" -> MangaState.UPCOMING
 				else -> null
@@ -391,6 +478,71 @@ internal class YomuMangas(context: MangaLoaderContext) :
 		return 0L
 	}
 
+	private fun parseSeriesTags(series: JSONObject): Set<MangaTag> {
+		val result = LinkedHashSet<MangaTag>(8)
+		val genres = series.optJSONArray("genres")
+		if (genres != null) {
+			for (i in 0 until genres.length()) {
+				when (val item = genres.opt(i)) {
+					is JSONObject -> {
+						val key = item.opt("id")?.toString()?.trim().orEmpty()
+						val title = item.getStringOrNull("name") ?: item.getStringOrNull("title")
+						if (key.isNotBlank() && !title.isNullOrBlank()) {
+							result.add(MangaTag(key = key, title = title, source = source))
+						}
+					}
+
+					is Number -> {
+						val key = item.toString()
+						genreIndex[key]?.let(result::add)
+					}
+
+					is String -> {
+						val key = item.trim()
+						if (key.isNotEmpty()) {
+							genreIndex[key]?.let(result::add)
+						}
+					}
+				}
+			}
+		}
+		return result
+	}
+
+	private fun parsePeopleArray(array: JSONArray?): Set<String> {
+		if (array == null) return emptySet()
+		val result = LinkedHashSet<String>(array.length())
+		for (i in 0 until array.length()) {
+			val name = array.optString(i).trim()
+			if (name.isNotEmpty() && name != "null") {
+				result.add(name)
+			}
+		}
+		return result
+	}
+
+	private fun parseAssetUrl(raw: String?): String? {
+		val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+		return when {
+			value.startsWith("http://") || value.startsWith("https://") -> value
+			value.startsWith("b2://") -> "$b2CdnUrl/${value.removePrefix("b2://")}"
+			value.startsWith("s3://") -> "$cdnUrl/${value.removePrefix("s3://")}"
+			value.startsWith("/") -> "$cdnUrl$value"
+			else -> "$cdnUrl/$value"
+		}
+	}
+
+	private fun extractMangaApiId(manga: Manga): Long {
+		if (manga.id > 0L && manga.id < 1_000_000_000_000L) {
+			return manga.id
+		}
+		val fromUrl = manga.url.substringAfter("/mangas/", "")
+			.substringBefore('/')
+			.toLongOrNull()
+			?: manga.url.substringAfterLast('/').toLongOrNull()
+		return fromUrl ?: error("Cannot extract manga ID from ${manga.url}")
+	}
+
 	private fun normalizeMangaUrl(value: String?): String? {
 		val raw = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
 		if (raw.startsWith("http://") || raw.startsWith("https://")) {
@@ -410,7 +562,7 @@ internal class YomuMangas(context: MangaLoaderContext) :
 	private fun MangaState.toApiSeriesStatus(): String? = when (this) {
 		MangaState.ONGOING -> "ONGOING"
 		MangaState.PAUSED -> "HIATUS"
-		MangaState.FINISHED -> "COMPLETED"
+		MangaState.FINISHED -> "COMPLETE"
 		MangaState.ABANDONED -> "DROPPED"
 		else -> null
 	}
@@ -426,6 +578,8 @@ internal class YomuMangas(context: MangaLoaderContext) :
 	private companion object {
 		private const val ACCEPT_JSON = "application/json"
 		private const val apiUrl = "https://api.yomumangas.com"
+		private const val cdnUrl = "https://s3.yomumangas.com"
+		private const val b2CdnUrl = "https://b2.yomumangas.com"
 		private val datePatterns = listOf(
 			"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
 			"yyyy-MM-dd'T'HH:mm:ssXXX",
