@@ -1,7 +1,5 @@
 package org.koitharu.kotatsu.parsers.site.ru
 
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.HttpStatusException
@@ -13,7 +11,6 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.exception.ParseException
-import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.Manga
 import org.koitharu.kotatsu.parsers.model.MangaChapter
 import org.koitharu.kotatsu.parsers.model.MangaListFilter
@@ -70,32 +67,22 @@ internal class MangaBuff(context: MangaLoaderContext) :
 	@Volatile
 	private var csrfToken: String? = null
 
-	@Volatile
-	private var filterData: FilterData? = null
-
-	private val filterDataMutex = Mutex()
 	private val chapterDateFormat = SimpleDateFormat("dd.MM.yyyy", Locale.ROOT)
+	private val stableGenres: Set<MangaTag> by lazy {
+		STABLE_GENRES.mapTo(LinkedHashSet()) { (id, title) ->
+			MangaTag(
+				key = TAG_GENRE_PREFIX + id,
+				title = title,
+				source = source,
+			)
+		}
+	}
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions {
-		val data = getFilterData()
 		return MangaListFilterOptions(
-			availableTags = data.tags,
-			availableStates = data.statusMap.keys.ifEmpty {
-				EnumSet.of(
-					MangaState.ONGOING,
-					MangaState.FINISHED,
-					MangaState.PAUSED,
-					MangaState.ABANDONED,
-				)
-			},
-			availableContentTypes = data.typeMap.keys.ifEmpty {
-				EnumSet.of(
-					ContentType.MANGA,
-					ContentType.MANHWA,
-					ContentType.MANHUA,
-					ContentType.COMICS,
-				)
-			},
+			availableTags = stableGenres,
+			availableStates = emptySet(),
+			availableContentTypes = emptySet(),
 		)
 	}
 
@@ -122,27 +109,18 @@ internal class MangaBuff(context: MangaLoaderContext) :
 			return parseMangaList(webClient.httpGet(url).parseHtml())
 		}
 
-		val data = getFilterData()
 		val url = "https://$domain/manga".toHttpUrl().newBuilder().apply {
 			filter.tags.forEach { tag ->
-				when {
-					tag.key.startsWith(TAG_GENRE_PREFIX) -> addQueryParameter("genres[]", tag.key.removePrefix(TAG_GENRE_PREFIX))
-					tag.key.startsWith(TAG_TAG_PREFIX) -> addQueryParameter("tags[]", tag.key.removePrefix(TAG_TAG_PREFIX))
-					else -> addQueryParameter("genres[]", tag.key)
+				val id = tag.key.removePrefix(TAG_GENRE_PREFIX)
+				if (id.isNotBlank()) {
+					addQueryParameter("genres[]", id)
 				}
 			}
 			filter.tagsExclude.forEach { tag ->
-				when {
-					tag.key.startsWith(TAG_GENRE_PREFIX) -> addQueryParameter("without_genres[]", tag.key.removePrefix(TAG_GENRE_PREFIX))
-					tag.key.startsWith(TAG_TAG_PREFIX) -> addQueryParameter("without_tags[]", tag.key.removePrefix(TAG_TAG_PREFIX))
-					else -> addQueryParameter("without_genres[]", tag.key)
+				val id = tag.key.removePrefix(TAG_GENRE_PREFIX)
+				if (id.isNotBlank()) {
+					addQueryParameter("without_genres[]", id)
 				}
-			}
-			filter.types.forEach { type ->
-				data.typeMap[type]?.let { addQueryParameter("type_id[]", it) }
-			}
-			filter.states.forEach { state ->
-				data.statusMap[state]?.let { addQueryParameter("status_id[]", it) }
 			}
 			if (filter.year != YEAR_UNKNOWN) {
 				addQueryParameter("year[]", filter.year.toString())
@@ -194,7 +172,10 @@ internal class MangaBuff(context: MangaLoaderContext) :
 			coverUrl = doc.selectFirst(".manga__img img, img.manga-mobile__image")?.src() ?: manga.coverUrl,
 			rating = rating,
 			chapters = chapterElements.mapChapters(reversed = true) { i, e ->
-				val chapterUrl = e.attrAsRelativeUrl("href")
+				val chapterHref = e.attrAsAbsoluteUrlOrNull("href")
+					?: e.attrOrNull("href")
+					?: throw ParseException("Cannot find chapter href", manga.url.toAbsoluteUrl(domain))
+				val chapterUrl = chapterHref.toRelativeUrl(domain)
 				val title = e.select(".chapters__volume, .chapters__value, .chapters__name").text()
 					.ifBlank { e.text() }
 				val chapterNumber = CHAPTER_NUMBER_REGEX.find(title)
@@ -365,89 +346,52 @@ internal class MangaBuff(context: MangaLoaderContext) :
 		return token
 	}
 
-	private suspend fun getFilterData(): FilterData = filterDataMutex.withLock {
-		filterData ?: fetchFilterData().also { filterData = it }
-	}
-
-	private suspend fun fetchFilterData(): FilterData {
-		val doc = webClient.httpGet("https://$domain/manga").parseHtml()
-
-		val tags = LinkedHashSet<MangaTag>()
-		doc.select("select[name='genres[]'] option, [name='genres[]'] option").forEach { option ->
-			val value = option.attr("value").trim()
-			val title = option.text().trim()
-			if (value.isNotEmpty() && title.isNotEmpty()) {
-				tags.add(
-					MangaTag(
-						key = TAG_GENRE_PREFIX + value,
-						title = title,
-						source = source,
-					),
-				)
-			}
-		}
-		doc.select("select[name='tags[]'] option, [name='tags[]'] option").forEach { option ->
-			val value = option.attr("value").trim()
-			val title = option.text().trim()
-			if (value.isNotEmpty() && title.isNotEmpty()) {
-				tags.add(
-					MangaTag(
-						key = TAG_TAG_PREFIX + value,
-						title = title,
-						source = source,
-					),
-				)
-			}
-		}
-
-		val typeMap = HashMap<ContentType, String>(4)
-		doc.select("select[name='type_id[]'] option, [name='type_id[]'] option").forEach { option ->
-			val value = option.attr("value").trim()
-			val text = option.text().lowercase(Locale.ROOT)
-			if (value.isEmpty()) {
-				return@forEach
-			}
-			when {
-				"манхва" in text || "manhwa" in text -> typeMap.putIfAbsent(ContentType.MANHWA, value)
-				"маньхуа" in text || "manhua" in text -> typeMap.putIfAbsent(ContentType.MANHUA, value)
-				"comic" in text || "комик" in text -> typeMap.putIfAbsent(ContentType.COMICS, value)
-				"манга" in text || "manga" in text -> typeMap.putIfAbsent(ContentType.MANGA, value)
-			}
-		}
-
-		val statusMap = HashMap<MangaState, String>(4)
-		doc.select("select[name='status_id[]'] option, [name='status_id[]'] option").forEach { option ->
-			val value = option.attr("value").trim()
-			val text = option.text().lowercase(Locale.ROOT)
-			if (value.isEmpty()) {
-				return@forEach
-			}
-			when {
-				"продолж" in text || "ongoing" in text -> statusMap.putIfAbsent(MangaState.ONGOING, value)
-				"заверш" in text || "completed" in text -> statusMap.putIfAbsent(MangaState.FINISHED, value)
-				"заморож" in text || "hiatus" in text -> statusMap.putIfAbsent(MangaState.PAUSED, value)
-				"заброш" in text || "dropped" in text -> statusMap.putIfAbsent(MangaState.ABANDONED, value)
-			}
-		}
-
-		return FilterData(
-			tags = tags,
-			typeMap = typeMap,
-			statusMap = statusMap,
-		)
-	}
-
-	private data class FilterData(
-		val tags: Set<MangaTag>,
-		val typeMap: Map<ContentType, String>,
-		val statusMap: Map<MangaState, String>,
-	)
-
 	private companion object {
 		private const val SEARCH_PREFIX = "slug:"
 		private const val CHAPTER_SELECTOR = "a.chapters__item"
 		private const val TAG_GENRE_PREFIX = "g:"
-		private const val TAG_TAG_PREFIX = "t:"
 		private val CHAPTER_NUMBER_REGEX = Regex("""\d+(?:[.,]\d+)?""")
+		private val STABLE_GENRES = listOf(
+			"1" to "Арт",
+			"4" to "Боевые искусства",
+			"5" to "Вампиры",
+			"6" to "Гарем",
+			"7" to "Гендерная интрига",
+			"8" to "Героическое фэнтези",
+			"9" to "Детектив",
+			"10" to "Дзёсэй",
+			"11" to "Додзинси",
+			"12" to "Драма",
+			"39" to "Ёнкома",
+			"18" to "Игра",
+			"13" to "История",
+			"21" to "Киберпанк",
+			"40" to "Кодомо",
+			"14" to "Комедия",
+			"20" to "Махо-сёдзе",
+			"15" to "Меха",
+			"16" to "Мистика",
+			"28" to "Мурим",
+			"17" to "Научная фантастика",
+			"19" to "Повседневность",
+			"22" to "Постапокалиптика",
+			"24" to "Приключения",
+			"25" to "Психология",
+			"26" to "Романтика",
+			"30" to "Сверхъестественное",
+			"31" to "Сёдзё",
+			"29" to "Сёнэн",
+			"32" to "Спорт",
+			"33" to "Сэйнэн",
+			"23" to "Трагедия",
+			"34" to "Триллер",
+			"35" to "Ужасы",
+			"27" to "Фантастика",
+			"36" to "Фэнтези",
+			"3" to "Школьная жизнь",
+			"2" to "Экшен",
+			"37" to "Эротика",
+			"38" to "Этти",
+		)
 	}
 }
