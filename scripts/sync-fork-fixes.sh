@@ -9,7 +9,7 @@ SOURCE_FILTER=""
 SOURCE_SPECS=(
   "upstream|https://github.com/KotatsuApp/kotatsu-parsers.git|master||auto"
   "redo|https://github.com/Kotatsu-Redo/kotatsu-parsers-redo.git|master|upstream|auto"
-  "yumemi|https://github.com/YakaTeam/kotatsu-parsers.git|master|upstream|auto"
+  "yumemi|https://github.com/YakaTeam/kotatsu-parsers.git|master|upstream|manual"
   "futon|https://github.com/AppFuton/futon-parsers.git|master|upstream|manual"
 )
 
