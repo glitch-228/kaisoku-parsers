@@ -16,7 +16,7 @@ on:
             sources:
                 description: "Comma-separated sources: upstream,redo,futon"
                 required: false
-                default: "upstream,redo,futon"
+                default: "upstream,redo"
                 type: string
     schedule:
         - cron: "53 4 * * 1"
