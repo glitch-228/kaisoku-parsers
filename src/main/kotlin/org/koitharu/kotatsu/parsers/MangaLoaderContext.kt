@@ -22,6 +22,13 @@ public abstract class MangaLoaderContext {
 
 	public fun newParserInstance(source: MangaParserSource): MangaParser = source.newParser(this)
 
+	public open fun newParserInstance(source: MangaSource): MangaParser {
+		require(source is MangaParserSource) { "Unsupported parser source: ${source.name}" }
+		return newParserInstance(source)
+	}
+
+	public open fun getParserSources(): List<MangaSource> = MangaParserSource.entries.toList()
+
 	public fun newLinkResolver(link: HttpUrl): LinkResolver = LinkResolver(this, link)
 
 	public fun newLinkResolver(link: String): LinkResolver = newLinkResolver(link.toHttpUrl())
@@ -47,6 +54,9 @@ public abstract class MangaLoaderContext {
 	 * @return execution result as string, may be null
 	 */
 	public abstract suspend fun evaluateJs(baseUrl: String, script: String, timeout: Long): String?
+
+	public open suspend fun evaluateJs(baseUrl: String, script: String): String? =
+		evaluateJs(baseUrl, script, timeout = 10000L)
 
 	/**
 	 * Open [url] in browser for some external action (e.g. captcha solving or non cookie-based authorization)

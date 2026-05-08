@@ -10,25 +10,52 @@ import java.io.IOException
 import kotlin.coroutines.resumeWithException
 
 internal class ContinuationCallCallback(
-    private val call: Call,
-    private val continuation: CancellableContinuation<Response>,
+    call: Call,
+    continuation: CancellableContinuation<Response>,
 ) : Callback, CompletionHandler {
 
+    @Volatile
+    private var call: Call? = call
+
+    @Volatile
+    private var continuation: CancellableContinuation<Response>? = continuation
+
     override fun onResponse(call: Call, response: Response) {
+        val continuation = takeContinuation()
+        if (continuation == null) {
+            response.closeQuietly()
+            return
+        }
         continuation.resume(response) { _, value, _ ->
             value.closeQuietly()
         }
     }
 
     override fun onFailure(call: Call, e: IOException) {
+        val continuation = takeContinuation() ?: return
         continuation.resumeWithException(e)
     }
 
     override fun invoke(cause: Throwable?) {
+        val call = takeCall()
         runCatching {
-            call.cancel()
+            call?.cancel()
         }.onFailure { e ->
             cause?.addSuppressed(e)
+        }
+    }
+
+    private fun takeContinuation(): CancellableContinuation<Response>? = synchronized(this) {
+        continuation.also {
+            continuation = null
+            call = null
+        }
+    }
+
+    private fun takeCall(): Call? = synchronized(this) {
+        call.also {
+            continuation = null
+            call = null
         }
     }
 }
