@@ -240,12 +240,12 @@ internal class ZenMangaParser(context: MangaLoaderContext) :
 			?: throw ParseException("Не удалось получить Astro JSON для деталей манги", manga.publicUrl)
 
 		val bookData = data["current-book"] as? Map<*, *> ?: return manga
-		val branchesData = data["current-book-branches"] as? List<Map<*, *>> ?: emptyList()
-		val chaptersData = data["current-book-chapters"] as? List<Map<*, *>> ?: emptyList()
+		val branchesData = (data["current-book-branches"] as? List<*>)?.filterIsInstance<Map<*, *>>() ?: emptyList()
+		val chaptersData = (data["current-book-chapters"] as? List<*>)?.filterIsInstance<Map<*, *>>() ?: emptyList()
 
 		val description = bookData["description"] as? String
 
-		val tags = (bookData["labels"] as? List<Map<*, *>>)?.mapNotNullTo(HashSet()) {
+		val tags = (bookData["labels"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.mapNotNullTo(HashSet()) {
 			val tagName = it["name"] as? String
 			val tagKey = it["slug"] as? String
 			if (tagName != null && tagKey != null) {
@@ -253,7 +253,7 @@ internal class ZenMangaParser(context: MangaLoaderContext) :
 			} else null
 		} ?: emptySet()
 
-		val authors = (bookData["relations"] as? List<Map<*, *>>)?.mapNotNullTo(HashSet()) {
+		val authors = (bookData["relations"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.mapNotNullTo(HashSet()) {
 			val type = it["type"] as? String
 			if (type == "AUTHOR" || type == "ARTIST") {
 				(it["publisher"] as? Map<*, *>)?.get("name") as? String
@@ -263,7 +263,7 @@ internal class ZenMangaParser(context: MangaLoaderContext) :
 		val branchIdToNameMap = branchesData.associate { branchMap ->
 			val branchId = branchMap["id"] as? String
 
-			val scanlatorNames = (branchMap["publishers"] as? List<Map<*, *>>)
+			val scanlatorNames = (branchMap["publishers"] as? List<*>)?.filterIsInstance<Map<*, *>>()
 				?.mapNotNull { publisherMap -> publisherMap["name"] as? String }
 				?.joinToString(" & ")
 
@@ -325,10 +325,10 @@ internal class ZenMangaParser(context: MangaLoaderContext) :
 		val chapterData = data["reader-current-chapter"] as? Map<*, *>
 			?: throw ParseException("Ключ 'reader-current-chapter' не найден", chapter.url)
 
-		val pagesList = chapterData["pages"] as? List<Map<*, *>>
+		val pagesListRaw = chapterData["pages"] as? List<*>
 			?: throw ParseException("Список страниц 'pages' не найден", chapter.url)
 
-		return pagesList
+		return pagesListRaw.filterIsInstance<Map<*, *>>()
 			.sortedBy { it["index"].toSafeInt() }
 			.mapNotNull { pageMap ->
 				val id = pageMap["id"] as? String

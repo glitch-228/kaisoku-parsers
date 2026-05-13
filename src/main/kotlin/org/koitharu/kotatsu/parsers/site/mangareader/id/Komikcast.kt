@@ -17,7 +17,7 @@ internal class Komikcast(context: MangaLoaderContext) :
 	)
 
     val searchPageSize = 28
-    override val configKeyDomain = ConfigKey.Domain("be.komikcast.fit")
+    override val configKeyDomain = ConfigKey.Domain("be.komikcast.cc")
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.UPDATED,
@@ -178,8 +178,8 @@ internal class Komikcast(context: MangaLoaderContext) :
 	}
 
 	override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
-		.add("Referer", "https://v1.komikcast.fit/")
-        .add("Origin", "https://v1.komikcast.fit")
+		.add("Referer", "https://v1.komikcast.cc/")
+        .add("Origin", "https://v1.komikcast.cc")
 		.build()
 
 	private suspend fun fetchGenreMap(): Map<String, MangaTag> {
