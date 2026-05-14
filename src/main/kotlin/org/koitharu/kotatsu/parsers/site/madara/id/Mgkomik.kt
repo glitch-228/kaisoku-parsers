@@ -1,6 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.madara.id
 
 import okhttp3.Headers
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
@@ -9,12 +10,14 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import java.util.*
 import kotlin.random.Random
 
+@Broken
 @MangaSourceParser("MGKOMIK", "MgKomik", "id")
 internal class Mgkomik(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MGKOMIK, "id.mgkomik.cc", 20) {
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
+        keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
 		keys.add(userAgentKey)
 	}
 
@@ -23,6 +26,8 @@ internal class Mgkomik(context: MangaLoaderContext) :
 	override val datePattern = "dd MMM yy"
 	override val stylePage = ""
 	override val sourceLocale: Locale = Locale.ENGLISH
+    override val withoutAjax = true
+    override val postReq = true
 	private val randomLength = Random.Default.nextInt(13, 21)
 	private val randomString = generateRandomString(randomLength)
 	override fun getRequestHeaders(): Headers = Headers.Builder()
