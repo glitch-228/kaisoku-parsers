@@ -3,7 +3,10 @@ package org.koitharu.kotatsu.parsers.site.likemanga
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
@@ -28,7 +31,38 @@ internal abstract class LikeMangaParser(
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
 		keys.add(userAgentKey)
-        keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
+		keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
+	}
+
+	// Always send the parser's domain root as Referer in addition to whatever the host app adds.
+	// likemanga.ink's image CDN (like.mgread.io) enforces hotlink protection: requests without an
+	// `https://likemanga.ink/...` Referer get a permanent CloudFlare block page, not a solvable
+	// challenge. Sending Referer at the parser layer means it's locked in even if a downstream
+	// interceptor (image proxy, etc.) strips the value the host added.
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.add("Referer", "https://$domain/")
+		.build()
+
+	// Image URLs returned from getPages() carry the originating chapter URL as a fragment
+	// (e.g. https://like.mgread.io/.../1.png#https://likemanga.ink/onepunchman-8328/chapter-231/).
+	// Strip the fragment here and use it as the Referer header on the actual request, so the CDN
+	// sees a full, plausible referer instead of just the bare domain root that some CloudFlare WAF
+	// rules treat as a generic hotlink attempt.
+	override fun intercept(chain: Interceptor.Chain): Response {
+		val request = chain.request()
+		val fragment = request.url.fragment
+		if (
+			fragment != null &&
+			(fragment.startsWith("https://") || fragment.startsWith("http://"))
+		) {
+			val cleanUrl = request.url.newBuilder().fragment(null).build()
+			val newRequest = request.newBuilder()
+				.url(cleanUrl)
+				.header("Referer", fragment)
+				.build()
+			return chain.proceed(newRequest)
+		}
+		return chain.proceed(request)
 	}
 
 	override val availableSortOrders: Set<SortOrder> =
@@ -228,7 +262,7 @@ internal abstract class LikeMangaParser(
 		val fullUrl = chapter.url.toAbsoluteUrl(domain)
 		val doc = webClient.httpGet(fullUrl).parseHtml()
 		val testJson = doc.selectFirst("div.reading input#next_img_token")
-		if (testJson != null) {
+		val rawUrls: List<String> = if (testJson != null) {
 			val jsonRaw = testJson.attr("value").split(".")[1]
 			val jsonData = JSONObject(context.decodeBase64(jsonRaw).toString(Charsets.UTF_8))
 			val jsonImg = context.decodeBase64(jsonData.getString("data")).toString(Charsets.UTF_8)
@@ -237,29 +271,20 @@ internal abstract class LikeMangaParser(
 			val cdn = baseUrl?.substringBefore("manga/", "")?.ifEmpty {
 				baseUrl.toHttpUrl().resolve("/").toString()
 			}
-			return images.map { img ->
-				val url = concatUrl(cdn.orEmpty(), img)
-				MangaPage(
-					id = generateUid(url),
-					url = url,
-					preview = null,
-					source = source,
-				)
-			}
-
+			images.map { img -> concatUrl(cdn.orEmpty(), img) }
 		} else {
-			return doc.select(".reading-detail  img").map { img ->
-				val url = img.requireSrc()
-				MangaPage(
-					id = generateUid(url),
-					url = url,
-					preview = null,
-					source = source,
-				)
-			}
-
+			doc.select(".reading-detail  img").map { img -> img.requireSrc() }
 		}
-
+		// Tack the chapter URL onto the image URL fragment so intercept() can use it as Referer.
+		// generateUid() runs on the bare URL so the page identity stays stable across visits.
+		return rawUrls.map { url ->
+			MangaPage(
+				id = generateUid(url),
+				url = "$url#$fullUrl",
+				preview = null,
+				source = source,
+			)
+		}
 	}
 
 	private fun parseChapterDate(dateFormat: DateFormat, date: String?): Long {
