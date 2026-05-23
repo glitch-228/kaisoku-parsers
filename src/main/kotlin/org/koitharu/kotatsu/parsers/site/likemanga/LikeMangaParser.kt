@@ -275,6 +275,17 @@ internal abstract class LikeMangaParser(
 		} else {
 			doc.select(".reading-detail  img").map { img -> img.requireSrc() }
 		}
+		// Prime CloudFlare's __cf_bm cookie for the CDN host (like.mgread.io). Direct OkHttp
+		// requests to the CDN get a 403 hotlink block until the cookie is set; a real browser
+		// gets it for free because it fetches embedded <img> tags from the chapter page under
+		// CloudFlare's normal "trusted navigation" allowance. Load the chapter URL in WebView
+		// (sharing Android's CookieManager with our OkHttp via AndroidCookieJar) and wait for
+		// the first chapter image to fire its load event — by then the Set-Cookie response is
+		// stored. Best-effort: if the JS path fails or times out, we still return the page URLs
+		// and let OkHttp try directly (it'll work for users CF doesn't gate-keep).
+		runCatchingCancellable {
+			context.evaluateJs(fullUrl, COOKIE_PRIME_SCRIPT, timeout = COOKIE_PRIME_TIMEOUT_MS)
+		}
 		// Tack the chapter URL onto the image URL fragment so intercept() can use it as Referer.
 		// generateUid() runs on the bare URL so the page identity stays stable across visits.
 		return rawUrls.map { url ->
@@ -299,5 +310,30 @@ internal abstract class LikeMangaParser(
 
 			else -> dateFormat.parseSafe(date)
 		}
+	}
+
+	private companion object {
+		// Block until the first chapter image (or any element on the page) reports a load event.
+		// CloudFlare sets __cf_bm via Set-Cookie on that image response, after which OkHttp can
+		// read it through the shared CookieManager. Returns "ok" on first image load, "no-img"
+		// if the page is empty, or "timeout"/"error" — any non-null/non-blank result unblocks
+		// evaluateJs and lets getPages move on.
+		private const val COOKIE_PRIME_SCRIPT = """
+(async () => {
+    try {
+        const imgs = Array.from(document.querySelectorAll('.reading-detail img, img'));
+        const cdnImgs = imgs.filter(i => (i.currentSrc || i.src || '').includes('mgread.io'));
+        if (cdnImgs.length === 0) return 'no-img';
+        const first = cdnImgs[0];
+        if (first.complete && first.naturalWidth > 0) return 'ok';
+        return await new Promise((resolve) => {
+            first.addEventListener('load', () => resolve('ok'), { once: true });
+            first.addEventListener('error', () => resolve('error'), { once: true });
+            setTimeout(() => resolve('timeout'), 8000);
+        });
+    } catch (e) { return 'js-error:' + (e && e.message); }
+})()
+"""
+		private const val COOKIE_PRIME_TIMEOUT_MS = 12_000L
 	}
 }
