@@ -188,14 +188,22 @@ internal class Comix(context: MangaLoaderContext) :
 					.addQueryParameter("page", page.toString()),
 				referer = manga.publicUrl,
 			)
-			val items = result.optJSONArray("items") ?: JSONArray()
+			val items = result.optJSONArray("items")
+				?: result.optJSONArray("data")
+				?: result.optJSONArray("chapters")
+				?: JSONArray()
 			for (i in 0 until items.length()) {
 				chapters += items.getJSONObject(i)
 			}
 			val meta = result.optJSONObject("meta") ?: result.optJSONObject("pagination")
-			val lastPage = meta?.optInt("lastPage", meta.optInt("last_page", page)) ?: page
-			val hasNext = meta?.optBoolean("hasNext", page < lastPage) ?: false
-			if (items.length() == 0 || (!hasNext && page >= lastPage)) {
+			val totalPages = meta?.optInt("lastPage", meta.optInt("last_page", page)) ?: page
+			val hasNext = when {
+				meta == null -> items.length() >= 100
+				meta.has("hasNext") -> meta.optBoolean("hasNext")
+				meta.has("has_next") -> meta.optBoolean("has_next")
+				else -> page < totalPages
+			}
+			if (items.length() == 0 || !hasNext) {
 				break
 			}
 			page++
@@ -337,7 +345,7 @@ internal class Comix(context: MangaLoaderContext) :
 			""".trimIndent(),
 		)
 		val raw = decodeJsString(context.evaluateJs(origin, script, SECURE_EVAL_TIMEOUT))
-		return JSONObject(raw)
+		return JSONObject(raw).unwrapResult()
 	}
 
 	private suspend fun secureScript(body: String): String {
