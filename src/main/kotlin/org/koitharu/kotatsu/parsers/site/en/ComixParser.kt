@@ -375,11 +375,29 @@ internal class Comix(context: MangaLoaderContext) :
 			?: throw ParseException("Missing Comix secure bundle", mainUrl)
 		val secureUrl = mainUrl.toHttpUrl().resolve(secureRef)
 			?: throw ParseException("Invalid Comix secure bundle url", mainUrl)
-		val secureScript = webClient.httpGet(secureUrl, apiHeaders()).parseRaw()
-			.replace(Regex("""export\s*\{[^}]+}\s*;?\s*$"""), "")
+		val secureScript = stripTrailingEsmExport(
+			webClient.httpGet(secureUrl, apiHeaders()).parseRaw(),
+		)
 		return SecureBundle(cfg = cfg, script = secureScript).also {
 			secureBundle = it
 		}
+	}
+
+	/**
+	 * Strips the trailing `export { ... };` ES-module statement so the secure bundle is
+	 * runnable in our non-module evaluator. Substring-based — the previous regex
+	 * (`export\s*\{[^}]+}\s*;?\s*$`) tripped Android's older `Pattern` parser into
+	 * "Syntax error in regexp pattern near index 17" on certain devices.
+	 */
+	private fun stripTrailingEsmExport(script: String): String {
+		val trimmed = script.trimEnd().trimEnd(';').trimEnd()
+		val closeIdx = trimmed.lastIndexOf('}')
+		if (closeIdx != trimmed.lastIndex) return script
+		val openIdx = trimmed.lastIndexOf('{', closeIdx - 1)
+		if (openIdx <= 0) return script
+		val prefix = trimmed.substring(0, openIdx).trimEnd()
+		if (!prefix.endsWith("export")) return script
+		return prefix.removeSuffix("export").trimEnd()
 	}
 
 	private fun apiUrlBuilder(vararg pathSegments: String): HttpUrl.Builder {
