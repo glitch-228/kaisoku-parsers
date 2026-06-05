@@ -14,8 +14,12 @@ import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
+import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.util.EnumSet
 import java.util.LinkedHashSet
+import java.util.Locale
 
 @MangaSourceParser("COMIX", "Comix", "en", ContentType.MANGA)
 internal class Comix(context: MangaLoaderContext) :
@@ -23,13 +27,16 @@ internal class Comix(context: MangaLoaderContext) :
 
 	override val configKeyDomain = ConfigKey.Domain("comix.to")
 
+	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
+		super.onCreateConfig(keys)
+		keys.add(userAgentKey)
+	}
+
 	private val origin: String
 		get() = "https://$domain"
 
 	private val apiBaseUrl: String
 		get() = "$origin/api/v1"
-
-	private var secureBundle: SecureBundle? = null
 
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = MangaListFilterCapabilities(
@@ -54,7 +61,7 @@ internal class Comix(context: MangaLoaderContext) :
 		availableContentRating = EnumSet.of(ContentRating.ADULT),
 	)
 
-	private suspend fun fetchAvailableTags(): Set<MangaTag> {
+	private fun fetchAvailableTags(): Set<MangaTag> {
 		return setOf(
 			// Genres
 			MangaTag(key = "6", title = "Action", source = source),
@@ -152,23 +159,27 @@ internal class Comix(context: MangaLoaderContext) :
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val chapterId = chapter.comixChapterId()
-		val result = protectedApiGet(
-			path = "chapters/$chapterId",
-			url = apiUrlBuilder("chapters", chapterId),
-			referer = "$origin${chapter.url}",
-		)
+		val response = webViewApiJson("/api/v1/chapters/$chapterId")
+		val result = response.unwrapResult()
 		val pages = result.optJSONObject("pages") ?: throw ParseException("Unable to find chapter pages", chapter.url)
-		val baseUrl = pages.optString("baseUrl").nullIfEmpty().orEmpty()
+		val baseUrl = pages.optString("baseUrl").nullIfEmpty().orEmpty().trimEnd('/')
 		val items = pages.optJSONArray("items") ?: throw ParseException("Unable to find chapter pages", chapter.url)
 		return List(items.length()) { i ->
-			val imageUrl = when (val item = items.get(i)) {
-				is String -> item
-				is JSONObject -> item.getString("url")
+			val (rawUrl, scrambled) = when (val item = items.get(i)) {
+				is String -> item to false
+				is JSONObject -> item.getString("url") to (item.optInt("s", 0) != 0)
 				else -> throw ParseException("Unexpected image format", chapter.url)
+			}
+			// Pages flagged scrambled (s == 1) are served pre-shuffled at `/i[3]/…`. Comix's CDN
+			// exposes a parallel `/si/…` endpoint that returns the same image already descrambled
+			// server-side; rewriting the path is the entire fix. Their frontend already does this
+			// for the legacy `/i/` paths; we extend it to the newer `/i3/` ones too.
+			val finalUrl = rawUrl.withBaseUrl(baseUrl).let { url ->
+				if (scrambled) url.replace(SCRAMBLE_URL_REGEX, "/si/") else url
 			}
 			MangaPage(
 				id = generateUid("$chapterId-$i"),
-				url = imageUrl.withBaseUrl(baseUrl),
+				url = finalUrl,
 				preview = null,
 				source = source,
 			)
@@ -177,35 +188,13 @@ internal class Comix(context: MangaLoaderContext) :
 
 	private suspend fun getChapters(manga: Manga): List<MangaChapter> {
 		val hid = manga.comixHid()
-		val chapters = ArrayList<JSONObject>()
-		var page = 1
-		while (true) {
-			val result = protectedApiGet(
-				path = "manga/$hid/chapters",
-				url = apiUrlBuilder("manga", hid, "chapters")
-					.addQueryParameter("order[number]", "desc")
-					.addQueryParameter("limit", "100")
-					.addQueryParameter("page", page.toString()),
-				referer = manga.publicUrl,
-			)
-			val items = result.optJSONArray("items") ?: JSONArray()
-			for (i in 0 until items.length()) {
-				chapters += items.getJSONObject(i)
-			}
-			val meta = result.optJSONObject("meta") ?: result.optJSONObject("pagination")
-			val lastPage = meta?.optInt("lastPage", meta.optInt("last_page", page)) ?: page
-			val hasNext = meta?.optBoolean("hasNext", page < lastPage) ?: false
-			if (items.length() == 0 || (!hasNext && page >= lastPage)) {
-				break
-			}
-			page++
+		val payload = webViewChapterList(hid)
+		val items = payload.optJSONArray("items") ?: JSONArray()
+		val builder = ChaptersListBuilder(items.length())
+		for (i in 0 until items.length()) {
+			builder.add(parseChapterFromJson(items.getJSONObject(i), manga))
 		}
-
-		val builder = ChaptersListBuilder(chapters.size)
-		chapters.asReversed().forEach { chapter ->
-			builder.add(parseChapterFromJson(chapter, manga))
-		}
-		return builder.toList()
+		return builder.toList().reversed()
 	}
 
 	private fun parseMangaFromJson(json: JSONObject): Manga {
@@ -244,160 +233,332 @@ internal class Comix(context: MangaLoaderContext) :
 		val number = json.optDouble("number", 0.0).toFloat()
 		val group = json.optJSONObject("group") ?: json.optJSONObject("scanlation_group")
 		val groupName = group?.optString("name")?.nullIfEmpty()
+		val scanlator = groupName ?: if (json.optBoolean("isOfficial")) "Official" else null
 		val url = json.optString("url").toRelativeUrl()
 			?: "${manga.url}/$chapterId-chapter-${number.toChapterUrlPart()}"
 		return MangaChapter(
-			id = generateUid("${groupName.orEmpty()}-$chapterId"),
+			id = generateUid("${scanlator.orEmpty()}-$chapterId"),
 			title = json.optString("name").nullIfEmpty(),
 			number = number,
 			volume = json.optInt("volume", 0),
 			url = url,
 			uploadDate = json.parseUploadDate(),
 			source = source,
-			scanlator = groupName,
-			branch = groupName,
+			scanlator = scanlator,
+			branch = scanlator,
 		)
-	}
-
-	private suspend fun protectedApiGet(
-		path: String,
-		url: HttpUrl.Builder,
-		referer: String,
-	): JSONObject {
-		val token = signApiPath(path)
-		val payload = webClient.httpGet(
-			url.addQueryParameter("_", token).build(),
-			apiHeaders(referer),
-		).parseJson()
-		return decryptApiPayload(path, payload)
-	}
-
-	private suspend fun signApiPath(path: String): String {
-		val script = secureScript(
-			"""
-				/* __COMIX_SIGN__ */
-				var requestInterceptors = [];
-				var fakeAxios = {
-					interceptors: {
-						request: { use: function(fn) { requestInterceptors.push(fn); } },
-						response: { use: function() {} }
-					},
-					defaults: { headers: { common: {} } }
-				};
-				v(fakeAxios);
-				var request = {
-					method: "get",
-					baseURL: "/api/v1",
-					url: ${JSONObject.quote("/$path")},
-					params: {},
-					headers: {}
-				};
-				for (var i = 0; i < requestInterceptors.length; i++) {
-					var next = requestInterceptors[i](request);
-					if (next) request = next;
-				}
-				request.params._;
-			""".trimIndent(),
-		)
-		return decodeJsString(context.evaluateJs(origin, script, SECURE_EVAL_TIMEOUT))
-	}
-
-	private suspend fun decryptApiPayload(path: String, payload: JSONObject): JSONObject {
-		if (!payload.has("e")) {
-			return payload.unwrapResult()
-		}
-		val script = secureScript(
-			"""
-				/* __COMIX_DECRYPT__ */
-				var responseInterceptors = [];
-				var fakeAxios = {
-					interceptors: {
-						request: { use: function() {} },
-						response: { use: function(fn) { responseInterceptors.push(fn); } }
-					},
-					defaults: { headers: { common: {} } }
-				};
-				v(fakeAxios);
-				var response = {
-					data: JSON.parse(${JSONObject.quote(payload.toString())}),
-					headers: { "x-enc": "1", "content-type": "application/json" },
-					config: {
-						method: "get",
-						baseURL: "/api/v1",
-						url: ${JSONObject.quote("/$path")},
-						params: {},
-						headers: {}
-					}
-				};
-				for (var i = 0; i < responseInterceptors.length; i++) {
-					var next = responseInterceptors[i](response);
-					if (next) response = next;
-				}
-				JSON.stringify(response.data);
-			""".trimIndent(),
-		)
-		val raw = decodeJsString(context.evaluateJs(origin, script, SECURE_EVAL_TIMEOUT))
-		return JSONObject(raw)
-	}
-
-	private suspend fun secureScript(body: String): String {
-		val bundle = loadSecureBundle()
-		return """
-			(function() {
-				var meta = document.querySelector('meta[name="cfg"]');
-				if (!meta) {
-					meta = document.createElement("meta");
-					meta.setAttribute("name", "cfg");
-					document.head.appendChild(meta);
-				}
-				meta.setAttribute("content", ${JSONObject.quote(bundle.cfg)});
-				${bundle.script}
-				$body
-			})()
-		""".trimIndent()
-	}
-
-	private suspend fun loadSecureBundle(): SecureBundle {
-		secureBundle?.let { return it }
-		val home = webClient.httpGet("$origin/home", apiHeaders()).parseHtml()
-		val cfg = home.selectFirst("meta[name=cfg]")?.attr("content")?.nullIfEmpty()
-			?: throw ParseException("Missing Comix secure config", "$origin/home")
-		val mainUrl = home.select("script[src]")
-			.asSequence()
-			.mapNotNull { it.absUrl("src").nullIfEmpty() }
-			.firstOrNull { it.contains("/main-") || it.endsWith("/main.js") }
-			?: throw ParseException("Missing Comix main bundle", "$origin/home")
-		val mainScript = webClient.httpGet(mainUrl, apiHeaders()).parseRaw()
-		val secureRef = Regex("""from\s*["'](\./secure[^"']+\.js)["']""")
-			.find(mainScript)
-			?.groupValues
-			?.get(1)
-			?: throw ParseException("Missing Comix secure bundle", mainUrl)
-		val secureUrl = mainUrl.toHttpUrl().resolve(secureRef)
-			?: throw ParseException("Invalid Comix secure bundle url", mainUrl)
-		val secureScript = stripTrailingEsmExport(
-			webClient.httpGet(secureUrl, apiHeaders()).parseRaw(),
-		)
-		return SecureBundle(cfg = cfg, script = secureScript).also {
-			secureBundle = it
-		}
 	}
 
 	/**
-	 * Strips the trailing `export { ... };` ES-module statement so the secure bundle is
-	 * runnable in our non-module evaluator. Substring-based — the previous regex
-	 * (`export\s*\{[^}]+}\s*;?\s*$`) tripped Android's older `Pattern` parser into
-	 * "Syntax error in regexp pattern near index 17" on certain devices.
+	 * Calls a protected `/api/v1/...` endpoint via a WebView bridge.
+	 *
+	 * Comix obfuscates two functions inside a `vmX_yyyy` namespace on `window`: a request
+	 * signer (computes the `_` query token) and an axios response interceptor (decrypts the
+	 * `e` payload). The legacy "rip out the secure bundle and run it in Rhino" approach
+	 * stopped working when Comix tightened the bundle; this WebView bridge mirrors the
+	 * approach upstream Kotatsu landed.
 	 */
-	private fun stripTrailingEsmExport(script: String): String {
-		val trimmed = script.trimEnd().trimEnd(';').trimEnd()
-		val closeIdx = trimmed.lastIndexOf('}')
-		if (closeIdx != trimmed.lastIndex) return script
-		val openIdx = trimmed.lastIndexOf('{', closeIdx - 1)
-		if (openIdx <= 0) return script
-		val prefix = trimmed.substring(0, openIdx).trimEnd()
-		if (!prefix.endsWith("export")) return script
-		return prefix.removeSuffix("export").trimEnd()
+	private suspend fun webViewApiJson(apiPath: String): JSONObject {
+		return evaluateWebViewJson(
+			label = apiPath,
+			script = buildWebViewApiScript("return JSON.stringify(await fetchProtected(${apiPath.toJsString()}));"),
+		)
+	}
+
+	private suspend fun webViewChapterList(hid: String): JSONObject {
+		val pathPrefix = "/api/v1/manga/$hid/chapters?page="
+		return evaluateWebViewJson(
+			label = "chapters:$hid",
+			script = buildWebViewApiScript(
+				"""
+					const all = [];
+					const compact = (item) => ({
+						id: item.id,
+						number: item.number,
+						name: item.name || "",
+						volume: item.volume || 0,
+						createdAt: item.createdAt || item.created_at || 0,
+						createdAtFormatted: item.createdAtFormatted || "",
+						isOfficial: !!item.isOfficial,
+						group: item.group || item.scanlation_group || null
+					});
+					const pagePath = (page) =>
+						${pathPrefix.toJsString()} + page +
+							"&limit=$CHAPTER_API_LIMIT&order%5Bnumber%5D=desc";
+					const pageInfo = (result, fallbackPage) => {
+						const pagination = (result && (result.pagination || result.meta)) || {};
+						return {
+							current: Number(pagination.page || pagination.current_page || fallbackPage),
+							last: Number(pagination.lastPage || pagination.last_page || 1)
+						};
+					};
+					let page = 1;
+					while (page <= $MAX_CHAPTER_API_PAGES) {
+						const root = await fetchProtected(pagePath(page));
+						const result = root && root.result ? root.result : root;
+						if (!result || !Array.isArray(result.items)) {
+							const keys = result && typeof result === "object" ? Object.keys(result).join(",") : typeof result;
+							throw new Error("chapter payload has no items; keys=" + keys);
+						}
+						const items = result.items;
+						for (const item of items) all.push(compact(item));
+						const pagination = pageInfo(result, page);
+						if (!items.length || pagination.current >= pagination.last) break;
+						page++;
+					}
+					return JSON.stringify({ items: all });
+				""".trimIndent(),
+			),
+		)
+	}
+
+	private suspend fun evaluateWebViewJson(label: String, script: String): JSONObject {
+		val startedAt = System.currentTimeMillis()
+		val bridgeUrl = "$origin/?kotatsu_comix_bridge=$startedAt"
+		val requests = runCatching {
+			context.interceptWebViewRequests(
+				bridgeUrl,
+				InterceptionConfig(
+					timeoutMs = WEBVIEW_API_TIMEOUT,
+					maxRequests = 1,
+					urlPattern = INTERCEPT_URL_REGEX,
+					pageScript = script,
+				),
+			)
+		}.getOrElse { e ->
+			throw ParseException("Comix WebView bridge failed for $label", bridgeUrl, e)
+		}
+		val resultUrl = requests.firstOrNull()?.url
+			?: throw ParseException("Comix WebView bridge produced no result for $label", bridgeUrl)
+		if (resultUrl.contains("/error", ignoreCase = true)) {
+			val message = resultUrl.queryParameterValue("msg") ?: "unknown WebView error"
+			throw ParseException("Comix WebView bridge failed for $label: $message", bridgeUrl)
+		}
+		val decoded = resultUrl.queryParameterValue("data")
+			?: throw ParseException("Comix WebView bridge result missing data for $label", bridgeUrl)
+		if (decoded == CLOUDFLARE_BLOCKED || isCloudflarePage(decoded)) {
+			requestCloudflareVerification(bridgeUrl)
+		}
+		if (decoded.isBlank()) {
+			throw ParseException("Comix WebView bridge returned empty payload for $label", bridgeUrl)
+		}
+		val json = runCatching { JSONObject(decoded) }.getOrElse { e ->
+			throw ParseException("Comix WebView bridge returned invalid JSON: ${decoded.take(200)}", bridgeUrl, e)
+		}
+		json.optString("error").nullIfEmpty()?.let { error ->
+			throw ParseException("Comix WebView bridge failed for $label: $error", bridgeUrl)
+		}
+		return json
+	}
+
+	private fun buildWebViewApiScript(body: String): String {
+		// The pageScript is wrapped by the host so it receives a `return value` from the inner closure.
+		// We emit a self-invoking async closure that posts result/error to the intercepted bridge URL.
+		val inner = """
+			(async () => {
+				const probePath = "/manga/g2rk/chapters";
+				const tokenRegex = /^[A-Za-z0-9_-]{20,200}$/;
+				const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+				const challengeDetected = () => {
+					const root = document.documentElement;
+					const html = (root && root.outerHTML) || "";
+					const text = ((document.body && document.body.innerText) || (root && root.innerText) || "");
+					const lower = (document.title + "\n" + text + "\n" + html).toLowerCase();
+					return document.querySelector('script[src*="challenge-platform"]') !== null ||
+						document.querySelector('script[src*="turnstile"]') !== null ||
+						document.querySelector('iframe[src*="challenges.cloudflare.com"]') !== null ||
+						document.querySelector('.cf-turnstile') !== null ||
+						document.querySelector('form[action*="__cf_chl"]') !== null ||
+						document.querySelector('.cf-browser-verification') !== null ||
+						((lower.includes('just a moment') || lower.includes('checking your browser')) && lower.includes('cloudflare')) ||
+						lower.includes('challenge-platform') ||
+						lower.includes('challenges.cloudflare.com') ||
+						lower.includes('cf-turnstile') ||
+						lower.includes('turnstile') ||
+						lower.includes('cf-chl-opt');
+				};
+				const findGlue = () => {
+					let signer = null;
+					let installer = null;
+					let responseHandler = null;
+					const keys = Object.keys(window);
+					for (let i = 0; i < keys.length; i++) {
+						const topName = keys[i];
+						if (!/^vm[A-Za-z]_\w+${'$'}/.test(topName)) continue;
+						const ns = window[topName];
+						if (!ns || typeof ns !== "object") continue;
+						const fnames = Object.keys(ns);
+						for (let j = 0; j < fnames.length; j++) {
+							const fn = ns[fnames[j]];
+							if (typeof fn !== "function") continue;
+							if (!signer) {
+								try {
+									const out = fn(probePath);
+									if (typeof out === "string" && out !== probePath && tokenRegex.test(out)) {
+										signer = fn;
+									}
+								} catch (e) {}
+							}
+							if (!installer) {
+								try {
+									let got = false;
+									let resFn = null;
+									const fakeAxios = {
+										interceptors: {
+											request: { use: function() {} },
+											response: { use: function(fn) { got = true; resFn = fn; } }
+										},
+										defaults: { headers: { common: {} }, transformRequest: [], transformResponse: [] }
+									};
+									fn(fakeAxios);
+									if (got) {
+										installer = fn;
+										responseHandler = resFn;
+									}
+								} catch (e) {}
+							}
+							if (signer && installer) return { signer, installer, responseHandler };
+						}
+					}
+					return null;
+				};
+
+				try {
+					let glue = null;
+					for (let attempt = 0; attempt < 80; attempt++) {
+						if (challengeDetected()) {
+							return "$CLOUDFLARE_BLOCKED";
+						}
+						glue = findGlue();
+						if (glue) break;
+						await sleep(250);
+					}
+					if (!glue) throw new Error("signer/decryptor not detected");
+
+					const captured = { res: glue.responseHandler || null };
+					if (!captured.res) {
+						const fakeAxios = {
+							interceptors: {
+								request: { use: function() {} },
+								response: { use: function(fn) { captured.res = fn; } }
+							},
+							defaults: { headers: { common: {} }, transformRequest: [], transformResponse: [] }
+						};
+						glue.installer(fakeAxios);
+					}
+
+					const signCandidates = (apiPath) => {
+						const withoutApi = apiPath.replace(/^\/api\/v1/, "");
+						const withoutQuery = withoutApi.split("?")[0];
+						const decoded = (() => {
+							try { return decodeURIComponent(withoutApi); } catch (e) { return withoutApi; }
+						})();
+						return [...new Set([withoutApi, decoded, withoutQuery])];
+					};
+
+					const fetchProtected = async (apiPath) => {
+						const sep = apiPath.indexOf("?") === -1 ? "?" : "&";
+						let resp = null;
+						let text = "";
+						let signedUrl = "";
+						let lastError = "";
+						const candidates = signCandidates(apiPath);
+						for (const signablePath of candidates) {
+							const sig = glue.signer(signablePath);
+							if (!sig) {
+								lastError = "signer returned empty token";
+								continue;
+							}
+							signedUrl = apiPath + sep + "_=" + encodeURIComponent(sig);
+							resp = await fetch(signedUrl, {
+								credentials: "include",
+								headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
+							});
+							text = await resp.text();
+							if (resp.status >= 200 && resp.status < 300) break;
+							lastError = "HTTP " + resp.status + " signed=" + signablePath + ": " + text.slice(0, 200);
+							if (resp.status !== 422) break;
+						}
+						if (!resp) throw new Error(lastError || "request was not sent");
+						if (resp.status < 200 || resp.status >= 300) {
+							throw new Error(lastError || ("HTTP " + resp.status + ": " + text.slice(0, 200)));
+						}
+						const raw = JSON.parse(text);
+						if (raw && typeof raw === "object" && "e" in raw && captured.res) {
+							const fakeResp = {
+								data: raw,
+								status: resp.status,
+								statusText: resp.statusText,
+								headers: Object.fromEntries([...resp.headers.entries()]),
+								config: { url: signedUrl, method: "get", baseURL: "/api/v1" },
+								request: {}
+							};
+							const decoded = await captured.res(fakeResp);
+							return { result: decoded && decoded.data };
+						}
+						if (raw && typeof raw === "object" && "e" in raw) {
+							throw new Error("encrypted response received but decryptor was not captured");
+						}
+						if (raw && typeof raw === "object" && "result" in raw) return raw;
+						return { result: raw };
+					};
+
+					$body
+				} catch (e) {
+					return JSON.stringify({ error: String((e && e.message) || e) });
+				}
+			})()
+		""".trimIndent()
+		return """
+			(async function() {
+				try {
+					const result = await $inner;
+					window.location.href = "$INTERCEPT_RESULT_URL#data=" + encodeURIComponent(String(result == null ? "" : result));
+				} catch (e) {
+					window.location.href = "$INTERCEPT_ERROR_URL#msg=" + encodeURIComponent(String((e && e.message) || e));
+				}
+			})();
+		""".trimIndent()
+	}
+
+	private fun requestCloudflareVerification(url: String, cause: Throwable? = null): Nothing {
+		try {
+			context.requestBrowserAction(this, url)
+		} catch (e: UnsupportedOperationException) {
+			throw ParseException(CLOUDFLARE_MESSAGE, url, cause ?: e)
+		}
+	}
+
+	private fun isCloudflarePage(html: String): Boolean {
+		if (html.isBlank()) return false
+		val lower = html.lowercase(Locale.US)
+		return lower.contains("<title>just a moment") ||
+			((lower.contains("just a moment") || lower.contains("checking your browser")) && lower.contains("cloudflare")) ||
+			lower.contains("cf-browser-verification") ||
+			lower.contains("cf-chl-opt") ||
+			lower.contains("challenge-platform") ||
+			lower.contains("challenges.cloudflare.com") ||
+			lower.contains("cf-turnstile") ||
+			lower.contains("turnstile")
+	}
+
+	private fun String.queryParameterValue(name: String): String? {
+		val query = substringAfter('#', substringAfter('?', ""))
+		if (query.isEmpty()) return null
+		return query.split('&')
+			.asSequence()
+			.map { it.split('=', limit = 2) }
+			.firstOrNull { it.size == 2 && it[0] == name }
+			?.get(1)
+			?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
+	}
+
+	private fun String.toJsString(): String {
+		return "\"" + replace("\\", "\\\\")
+			.replace("\"", "\\\"")
+			.replace("\n", "\\n")
+			.replace("\r", "\\r")
+			.replace("\t", "\\t") + "\""
 	}
 
 	private fun apiUrlBuilder(vararg pathSegments: String): HttpUrl.Builder {
@@ -519,7 +680,7 @@ internal class Comix(context: MangaLoaderContext) :
 		"finished", "completed", "complete" -> MangaState.FINISHED
 		"releasing", "ongoing" -> MangaState.ONGOING
 		"on_hiatus", "hiatus" -> MangaState.PAUSED
-		"cancelled", "canceled", "dropped" -> MangaState.ABANDONED
+		"cancelled", "canceled", "dropped", "discontinued" -> MangaState.ABANDONED
 		else -> null
 	}
 
@@ -540,7 +701,7 @@ internal class Comix(context: MangaLoaderContext) :
 		return if (startsWith("http://") || startsWith("https://")) {
 			this
 		} else {
-			baseUrl + this
+			"$baseUrl/${trimStart('/')}"
 		}
 	}
 
@@ -557,22 +718,18 @@ internal class Comix(context: MangaLoaderContext) :
 		return if (this == intValue.toFloat()) intValue.toString() else toString()
 	}
 
-	private fun decodeJsString(raw: String?): String {
-		val value = raw ?: throw ParseException("Comix secure script returned null", origin)
-		return if (value.startsWith('"')) {
-			JSONArray("[$value]").getString(0)
-		} else {
-			value
-		}
-	}
-
-	private data class SecureBundle(
-		val cfg: String,
-		val script: String,
-	)
-
 	private companion object {
-		private const val SECURE_EVAL_TIMEOUT = 10_000L
+		private const val WEBVIEW_API_TIMEOUT = 90_000L
+		private const val CHAPTER_API_LIMIT = 100
+		private const val MAX_CHAPTER_API_PAGES = 30
+		private const val CLOUDFLARE_BLOCKED = "CLOUDFLARE_BLOCKED"
+		private const val INTERCEPT_RESULT_URL = "https://kotatsu.intercept/result"
+		private const val INTERCEPT_ERROR_URL = "https://kotatsu.intercept/error"
+		private val INTERCEPT_URL_REGEX = Regex("https://kotatsu\\.intercept/.*", RegexOption.IGNORE_CASE)
+		private const val CLOUDFLARE_MESSAGE = "Cloudflare verification is required. Open Comix in the in-app browser, complete the check, then try again."
 		private val TAG_ARRAY_KEYS = arrayOf("genres", "demographics", "formats", "tags")
+		// Matches Comix's image-CDN scrambled-tier path prefix. Their frontend rewrites only
+		// `/i/[bh]…` paths to `/si/…`; the newer `/i3/…` tier needs the same swap.
+		private val SCRAMBLE_URL_REGEX = Regex("""/i3?/""")
 	}
 }
