@@ -1,0 +1,43 @@
+name: Discord Commit Webhook
+
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  discordNotification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send commit embed to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.event.repository.name }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          ACTOR: ${{ github.actor }}
+          BRANCH: ${{ github.ref_name }}
+          TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+        run: |
+          jq -n \
+            --arg content "<@&1507819392233242624>" \
+            --arg title "New Commit: ${REPO}" \
+            --arg url "${COMMIT_URL}" \
+            --arg description "${COMMIT_MSG}" \
+            --arg author_name "${ACTOR}" \
+            --arg author_icon "https://github.com/${ACTOR}.png" \
+            --arg footer "Branch: ${BRANCH}" \
+            --arg timestamp "${TIMESTAMP}" \
+            '{
+              content: $content,
+              allowed_mentions: { roles: ["1507819392233242624"] },
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $description,
+                color: 5814783,
+                author: { name: $author_name, icon_url: $author_icon },
+                footer: { text: $footer },
+                timestamp: $timestamp
+              }]
+            }' | curl -fsS -H "Content-Type: application/json" -X POST -d @- "$WEBHOOK"
