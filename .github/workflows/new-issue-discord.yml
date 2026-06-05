@@ -24,9 +24,7 @@ jobs:
           # silently killing the webhook. Truncate with headroom.
           DESC="${BODY}"
           if [ ${#DESC} -gt 3800 ]; then
-            DESC="${DESC:0:3800}
-
-…(truncated; open the issue for full body)"
+            DESC="${DESC:0:3800}"$'\n\n'"…(truncated; open the issue for full body)"
           fi
           jq -n \
             --arg title "New Issue: ${TITLE}" \
