@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.util
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.model.Favicon
 import org.koitharu.kotatsu.parsers.model.Favicons
@@ -15,7 +16,13 @@ public class FaviconParser(
 
 	public suspend fun parseFavicons(): Favicons = withContext(Dispatchers.Default) {
 		val url = "https://$domain"
-		val doc = webClient.httpGet(url).parseHtml()
+		// Favicon links live in <head>, so read only a bounded prefix of the homepage instead of
+		// downloading and parsing the whole (often very large) page — the latter spikes memory and
+		// can OOM when several sources' icons are fetched at once.
+		val doc = webClient.httpGet(url).use { response ->
+			val html = response.peekBody(MAX_HEAD_BYTES).string().substringBeforeHeadEnd()
+			Jsoup.parse(html, url)
+		}
 		val result = HashSet<Favicon>()
 		val manifestLink = doc.getElementsByAttributeValue("rel", "manifest").firstOrNull()
 			?.attrAsAbsoluteUrlOrNull("href")
@@ -89,4 +96,14 @@ public class FaviconParser(
 		startsWith('/') -> "https://$domain$this"
 		else -> "https://$domain/$this"
 	}
+
+	private fun String.substringBeforeHeadEnd(): String {
+		val idx = indexOf("</head", ignoreCase = true)
+		return if (idx >= 0) substring(0, idx) else this
+	}
+
+	private companion object {
+		private const val MAX_HEAD_BYTES = 256L * 1024L
+	}
 }
+
