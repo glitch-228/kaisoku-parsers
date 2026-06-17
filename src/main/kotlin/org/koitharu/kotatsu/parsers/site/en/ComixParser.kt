@@ -7,6 +7,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -21,6 +22,12 @@ import java.util.EnumSet
 import java.util.LinkedHashSet
 import java.util.Locale
 
+// comix.to gates every chapter/page behind a per-request `_` signature AND returns AES-style
+// encrypted API bodies, both produced by an env-locked anti-tamper VM that only runs in its own
+// page. We can sign in-WebView (verified on-device) but can't decrypt responses offline; page
+// images are content-addressed and listed only via that encrypted API. The only working read path
+// is a slow per-chapter WebView render+scrape, so the source is disabled until a feasible path exists.
+@Broken
 @MangaSourceParser("COMIX", "Comix", "en", ContentType.MANGA)
 internal class Comix(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.COMIX, 28) {
