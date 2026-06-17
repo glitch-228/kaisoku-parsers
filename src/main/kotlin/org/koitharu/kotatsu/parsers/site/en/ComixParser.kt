@@ -356,8 +356,10 @@ internal class Comix(context: MangaLoaderContext) :
 		// We emit a self-invoking async closure that posts result/error to the intercepted bridge URL.
 		val inner = """
 			(async () => {
-				const probePath = "/manga/g2rk/chapters";
-				const tokenRegex = /^[A-Za-z0-9_-]{20,200}$/;
+				const probeA = "/manga/g2rk/chapters";
+				const probeB = "/manga/zz9q4r/chapters";
+				const TOKEN_BAD = /[^A-Za-z0-9_+\/=.%-]/;
+				const isToken = (s) => typeof s === "string" && s.length >= 12 && s.length <= 600 && !TOKEN_BAD.test(s);
 				const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 				const challengeDetected = () => {
 					const root = document.documentElement;
@@ -365,59 +367,120 @@ internal class Comix(context: MangaLoaderContext) :
 					const text = ((document.body && document.body.innerText) || (root && root.innerText) || "");
 					const lower = (document.title + "\n" + text + "\n" + html).toLowerCase();
 					return document.querySelector('script[src*="challenge-platform"]') !== null ||
-						document.querySelector('script[src*="turnstile"]') !== null ||
 						document.querySelector('iframe[src*="challenges.cloudflare.com"]') !== null ||
 						document.querySelector('.cf-turnstile') !== null ||
 						document.querySelector('form[action*="__cf_chl"]') !== null ||
 						document.querySelector('.cf-browser-verification') !== null ||
 						((lower.includes('just a moment') || lower.includes('checking your browser')) && lower.includes('cloudflare')) ||
 						lower.includes('challenge-platform') ||
-						lower.includes('challenges.cloudflare.com') ||
-						lower.includes('cf-turnstile') ||
-						lower.includes('turnstile') ||
-						lower.includes('cf-chl-opt');
+						lower.includes('challenges.cloudflare.com');
 				};
-				const findGlue = () => {
+
+				// Comix moved its request signer + response codec out of the window.vm*_ globals into an
+				// obfuscated ES module (secure-<hash>.js). Import the already-loaded instance (ES modules
+				// are per-URL singletons, so its internal VM state is shared with the page) and probe its
+				// exports: the signer is the export mapping a path to a path-dependent token string.
+				const findSecureUrl = () => {
+					try {
+						const res = performance.getEntriesByType("resource") || [];
+						for (let i = 0; i < res.length; i++) {
+							const n = (res[i] && res[i].name) || "";
+							if (n.indexOf("/secure-") !== -1 && n.indexOf(".js") !== -1) return n;
+						}
+					} catch (e) {}
+					const nodes = document.querySelectorAll('link[rel="modulepreload"],script[type="module"][src]');
+					for (let i = 0; i < nodes.length; i++) {
+						const u = nodes[i].href || nodes[i].src || "";
+						if (u.indexOf("/secure-") !== -1 && u.indexOf(".js") !== -1) return u;
+					}
+					return null;
+				};
+
+				const buildFromModule = (mod) => {
+					const fns = [];
+					const ks = Object.keys(mod || {});
+					for (let i = 0; i < ks.length; i++) {
+						try { if (typeof mod[ks[i]] === "function") fns.push(mod[ks[i]]); } catch (e) {}
+					}
 					let signer = null;
-					let installer = null;
-					let responseHandler = null;
+					for (let i = 0; i < fns.length; i++) {
+						try {
+							const a = fns[i](probeA);
+							const b = fns[i](probeB);
+							if (isToken(a) && isToken(b) && a !== b) { signer = fns[i]; break; }
+						} catch (e) {}
+					}
+					if (!signer) return null;
+					const others = fns.filter((f) => f !== signer);
+					const decrypt = async (raw) => {
+						const enc = raw && raw.e;
+						const shapes = [
+							(d) => d(raw),
+							(d) => d(enc),
+							(d) => d({ data: raw, status: 200, statusText: "OK", headers: {}, config: { url: "", method: "get", baseURL: "/api/v1" }, request: {} }),
+							(d) => d({ e: enc }),
+						];
+						for (let i = 0; i < others.length; i++) {
+							for (let j = 0; j < shapes.length; j++) {
+								try {
+									let v = shapes[j](others[i]);
+									if (v && typeof v.then === "function") v = await v;
+									if (v == null) continue;
+									const cand = (v && typeof v === "object" && "data" in v) ? v.data : v;
+									if (cand && typeof cand === "object" &&
+										(("result" in cand) || ("items" in cand) || ("hid" in cand) || ("id" in cand) || ("pages" in cand))) {
+										return cand;
+									}
+								} catch (e) {}
+							}
+						}
+						return null;
+					};
+					return { signer: signer, decrypt: decrypt };
+				};
+
+				// Legacy fallback: some deployments may still expose a window.vm*_ signer + axios installer.
+				const buildFromWindow = () => {
 					const keys = Object.keys(window);
 					for (let i = 0; i < keys.length; i++) {
 						const topName = keys[i];
-						if (!/^vm[A-Za-z]_\w+${'$'}/.test(topName)) continue;
+						if (topName.indexOf("vm") !== 0 || topName.indexOf("_") < 1) continue;
 						const ns = window[topName];
 						if (!ns || typeof ns !== "object") continue;
 						const fnames = Object.keys(ns);
+						let signer = null;
+						let responseHandler = null;
 						for (let j = 0; j < fnames.length; j++) {
 							const fn = ns[fnames[j]];
 							if (typeof fn !== "function") continue;
 							if (!signer) {
-								try {
-									const out = fn(probePath);
-									if (typeof out === "string" && out !== probePath && tokenRegex.test(out)) {
-										signer = fn;
-									}
-								} catch (e) {}
+								try { const out = fn(probeA); if (isToken(out) && out !== probeA) signer = fn; } catch (e) {}
 							}
-							if (!installer) {
+							if (!responseHandler) {
 								try {
 									let got = false;
 									let resFn = null;
-									const fakeAxios = {
+									fn({
 										interceptors: {
-											request: { use: function() {} },
-											response: { use: function(fn) { got = true; resFn = fn; } }
+											request: { use: function () {} },
+											response: { use: function (h) { got = true; resFn = h; } }
 										},
 										defaults: { headers: { common: {} }, transformRequest: [], transformResponse: [] }
-									};
-									fn(fakeAxios);
-									if (got) {
-										installer = fn;
-										responseHandler = resFn;
-									}
+									});
+									if (got) responseHandler = resFn;
 								} catch (e) {}
 							}
-							if (signer && installer) return { signer, installer, responseHandler };
+						}
+						if (signer) {
+							const decrypt = async (raw) => {
+								if (!responseHandler) return null;
+								const decoded = await responseHandler({
+									data: raw, status: 200, statusText: "OK", headers: {},
+									config: { url: "", method: "get", baseURL: "/api/v1" }, request: {}
+								});
+								return decoded && decoded.data;
+							};
+							return { signer: signer, decrypt: decrypt };
 						}
 					}
 					return null;
@@ -425,34 +488,27 @@ internal class Comix(context: MangaLoaderContext) :
 
 				try {
 					let glue = null;
+					let secureUrl = null;
 					for (let attempt = 0; attempt < 80; attempt++) {
-						if (challengeDetected()) {
-							return "$CLOUDFLARE_BLOCKED";
+						if (challengeDetected()) return "$CLOUDFLARE_BLOCKED";
+						if (!secureUrl) secureUrl = findSecureUrl();
+						if (secureUrl && !glue) {
+							try {
+								const mod = await import(secureUrl);
+								glue = buildFromModule(mod);
+							} catch (e) {}
 						}
-						glue = findGlue();
+						if (!glue) glue = buildFromWindow();
 						if (glue) break;
 						await sleep(250);
 					}
-					if (!glue) throw new Error("signer/decryptor not detected");
-
-					const captured = { res: glue.responseHandler || null };
-					if (!captured.res) {
-						const fakeAxios = {
-							interceptors: {
-								request: { use: function() {} },
-								response: { use: function(fn) { captured.res = fn; } }
-							},
-							defaults: { headers: { common: {} }, transformRequest: [], transformResponse: [] }
-						};
-						glue.installer(fakeAxios);
-					}
+					if (!glue) throw new Error("signer not detected (secure=" + (secureUrl || "none") + ")");
 
 					const signCandidates = (apiPath) => {
 						const withoutApi = apiPath.replace(/^\/api\/v1/, "");
 						const withoutQuery = withoutApi.split("?")[0];
-						const decoded = (() => {
-							try { return decodeURIComponent(withoutApi); } catch (e) { return withoutApi; }
-						})();
+						let decoded = withoutApi;
+						try { decoded = decodeURIComponent(withoutApi); } catch (e) {}
 						return [...new Set([withoutApi, decoded, withoutQuery])];
 					};
 
@@ -465,10 +521,7 @@ internal class Comix(context: MangaLoaderContext) :
 						const candidates = signCandidates(apiPath);
 						for (const signablePath of candidates) {
 							const sig = glue.signer(signablePath);
-							if (!sig) {
-								lastError = "signer returned empty token";
-								continue;
-							}
+							if (!sig) { lastError = "signer returned empty token"; continue; }
 							signedUrl = apiPath + sep + "_=" + encodeURIComponent(sig);
 							resp = await fetch(signedUrl, {
 								credentials: "include",
@@ -484,20 +537,10 @@ internal class Comix(context: MangaLoaderContext) :
 							throw new Error(lastError || ("HTTP " + resp.status + ": " + text.slice(0, 200)));
 						}
 						const raw = JSON.parse(text);
-						if (raw && typeof raw === "object" && "e" in raw && captured.res) {
-							const fakeResp = {
-								data: raw,
-								status: resp.status,
-								statusText: resp.statusText,
-								headers: Object.fromEntries([...resp.headers.entries()]),
-								config: { url: signedUrl, method: "get", baseURL: "/api/v1" },
-								request: {}
-							};
-							const decoded = await captured.res(fakeResp);
-							return { result: decoded && decoded.data };
-						}
 						if (raw && typeof raw === "object" && "e" in raw) {
-							throw new Error("encrypted response received but decryptor was not captured");
+							const data = await glue.decrypt(raw);
+							if (data == null) throw new Error("encrypted response received but decryptor was not found");
+							return { result: data };
 						}
 						if (raw && typeof raw === "object" && "result" in raw) return raw;
 						return { result: raw };
