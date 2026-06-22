@@ -510,7 +510,7 @@ internal class MangaDexParser(context: MangaLoaderContext) : FlexibleMangaParser
 		repeat(length()) { i ->
 			val item = getJSONObject(i)
 			val keyValue = item.getString(key)
-			destination.computeIfAbsent(keyValue) { mutableListOf() }.add(item)
+			destination.getOrPut(keyValue) { mutableListOf() }.add(item)
 		}
 		return destination
 	}

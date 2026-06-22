@@ -19,7 +19,7 @@ import java.util.*
 internal class GocTruyenTranhVui(context: MangaLoaderContext):
     PagedMangaParser(context, MangaParserSource.GOCTRUYENTRANHVUI, 50) {
 
-    override val configKeyDomain = ConfigKey.Domain("goctruyentranhvui17.com")
+    override val configKeyDomain = ConfigKey.Domain("goctruyentranhvui30.com")
     private val apiUrl by lazy { "https://$domain/api/v2" }
 
     private val requestMutex = Mutex()
