@@ -25,6 +25,14 @@ public abstract class AbstractMangaParser @InternalParsersApi constructor(
 	public final override val source: MangaParserSource,
 ) : MangaParser {
 
+	/**
+	 * ABI shim for plugins built against pre-"Update parsers structure" kotatsu-parsers, whose base
+	 * constructors took the [MangaSource] interface. Delegates to the [MangaParserSource] constructor
+	 * so such plugins still link against newer hosts (the runtime value is always a MangaParserSource).
+	 */
+	@InternalParsersApi
+	public constructor(context: MangaLoaderContext, source: MangaSource) : this(context, source as MangaParserSource)
+
 	public final override val searchQueryCapabilities: MangaSearchQueryCapabilities
 		get() = filterCapabilities.toMangaSearchQueryCapabilities()
 
