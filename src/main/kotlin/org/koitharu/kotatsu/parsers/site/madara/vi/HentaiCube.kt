@@ -1,12 +1,15 @@
 package org.koitharu.kotatsu.parsers.site.madara.vi
 
+import okhttp3.Headers
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
-import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
+import org.koitharu.kotatsu.parsers.network.CloudFlareHelper
+import org.koitharu.kotatsu.parsers.network.UserAgents
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.util.*
+import org.koitharu.kotatsu.parsers.util.json.asTypedList
 import org.koitharu.kotatsu.parsers.util.suspendlazy.getOrNull
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 
@@ -140,19 +143,33 @@ internal class HentaiCube(context: MangaLoaderContext) :
 		)
 	}
 
+	// Pages are now gated behind a Cloudflare-backed nonce challenge: fetch a nonce, then request
+	// the image list with it (mirrors the dragonx/manga-repo fix; plain reading-content scrape 403s).
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.toAbsoluteUrl(domain)
-		val doc = webClient.httpGet(fullUrl).parseHtml()
-		val root = doc.body().selectFirst("div.main-col-inner")?.selectFirst("div.reading-content")
-			?: throw ParseException("Root not found", fullUrl)
-		return root.select("img").map { img ->
-			val url = img.requireSrc().toRelativeUrl(domain)
-			MangaPage(
-				id = generateUid(url),
-				url = url,
-				preview = null,
-				source = source,
-			)
+		val originUrl = chapter.url.substringBeforeLast("/ch").toAbsoluteUrl(domain)
+		val referer = chapter.url.toAbsoluteUrl(domain)
+		val cfCookies = "cf_chl_rc_ni=1; cf_clearance=" + CloudFlareHelper.getClearanceCookie(context.cookieJar, originUrl)
+		val challengeHeaders = Headers.Builder()
+			.add("Referer", referer)
+			.add("User-Agent", UserAgents.CHROME_DESKTOP)
+			.add("Cookie", cfCookies)
+			.build()
+		val nonce = webClient.httpGet(
+			urlBuilder().addPathSegments("wp-json/manga-reader/v1/challenge").build(),
+			challengeHeaders,
+		).parseJson().getString("nonce")
+		val imageHeaders = Headers.Builder()
+			.add("Referer", referer)
+			.add("User-Agent", UserAgents.CHROME_DESKTOP)
+			.add("Cookie", cfCookies)
+			.add("x-masr-nonce", nonce)
+			.build()
+		val json = webClient.httpGet(
+			urlBuilder().addPathSegments("wp-json/manga-reader/v1/images").build(),
+			imageHeaders,
+		).parseJson()
+		return json.getJSONArray("images").asTypedList<String>().map {
+			MangaPage(id = generateUid(it), url = it, preview = null, source = source)
 		}
 	}
 
