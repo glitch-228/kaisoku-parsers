@@ -30,7 +30,7 @@ import java.net.HttpURLConnection
 import java.text.SimpleDateFormat
 import java.util.*
 
-private const val PAGE_SIZE = 70
+private const val PAGE_SIZE = 50
 private const val NSFW_ALERT = "сексуальные сцены"
 private const val NOTHING_FOUND = "Ничего не найдено"
 private const val MIN_IMAGE_SIZE = 1024L
