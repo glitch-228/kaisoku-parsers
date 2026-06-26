@@ -176,8 +176,9 @@ internal abstract class IkenParser(
             throw Exception("Need to unlock chapter!")
         }
 
-		val imagesJson = doc.getNextJson("images")
-		val images = parseImagesJson(imagesJson)
+		// Newer (Astro) layouts render pages directly as <img>; older (Next.js) ones embed them in a script payload
+		val images = doc.select(selectPages).mapNotNull { it.src() }
+			.ifEmpty { parseImagesJson(doc.getNextJson("images")) }
 
 		return images.map { p ->
 			MangaPage(
