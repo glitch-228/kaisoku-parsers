@@ -42,7 +42,7 @@ internal class HentaiNexus(context: MangaLoaderContext) :
 	override val selectAuthor = "tr:contains(Artist) td:nth-child(2) a"
 	override val selectLanguageChapter = ""
 	override val selectUrlChapter = ""
-	override val selectTotalPage = ".section div.container:nth-child(2) > div.box > div.columns div.column"
+	override val selectTotalPage = "div.column.is-2-fullhd"
 
 	val selectReadUrl = "a:contains(Read Online)"
 	val selectPublisher = "tr:contains(Publisher) td:nth-child(2)"
