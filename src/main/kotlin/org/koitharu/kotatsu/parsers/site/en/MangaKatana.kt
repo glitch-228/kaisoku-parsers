@@ -16,10 +16,18 @@ internal class MangaKatana(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.MANGAKATANA, pageSize = 55) {
 
 	override val configKeyDomain = ConfigKey.Domain("mangakatana.com")
+	private val preferredServerKey = ConfigKey.PreferredImageServer(
+		presetValues = mapOf(
+			"?sv=mk" to "First server",
+			"?sv=3" to "Second server",
+		),
+		defaultValue = "?sv=mk",
+	)
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
 		keys.add(userAgentKey)
+		keys.add(preferredServerKey)
 	}
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -174,13 +182,27 @@ internal class MangaKatana(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
+		val chapterUrl = chapter.url.toAbsoluteUrl(domain)
+		val selectedUrl = chapterUrl + config[preferredServerKey]
+		parsePages(webClient.httpGet(selectedUrl).parseHtml()).takeIf { it.isNotEmpty() }?.let { return it }
+		if (selectedUrl != chapterUrl) {
+			parsePages(webClient.httpGet(chapterUrl).parseHtml()).takeIf { it.isNotEmpty() }?.let { return it }
+		}
+		return emptyList()
+	}
+
+	private fun parsePages(doc: Document): List<MangaPage> {
 		val script = doc.select("script").firstOrNull { imageArrayRegex.containsMatchIn(it.data()) }?.data()
-			?: return emptyList()
-		val match = imageArrayRegex.find(script) ?: return emptyList()
-		val body = match.groupValues[1]
-		return urlRegex.findAll(body).map { m ->
-			val url = m.groupValues[1]
+		val scriptUrls = script?.let(imageArrayRegex::find)?.groupValues?.get(1)?.let(urlRegex::findAll)
+			?.map { it.groupValues[1] }
+			?.toList()
+			.orEmpty()
+		val urls = scriptUrls.ifEmpty {
+			doc.select("div.wrap_img img").mapNotNull { img ->
+				(img.attrOrNull("data-src") ?: img.attrOrNull("src"))?.takeIf { it.startsWith("http") }
+			}
+		}
+		return urls.map { url ->
 			MangaPage(
 				id = generateUid(url),
 				url = url,

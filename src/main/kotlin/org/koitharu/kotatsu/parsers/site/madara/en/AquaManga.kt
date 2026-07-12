@@ -1,51 +1,196 @@
 package org.koitharu.kotatsu.parsers.site.madara.en
 
-import okhttp3.Headers
+import org.jsoup.nodes.Document
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
-import org.koitharu.kotatsu.parsers.model.MangaParserSource
+import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
-import java.util.Base64
-import kotlin.random.Random
+import org.koitharu.kotatsu.parsers.util.*
+import java.text.SimpleDateFormat
+import java.util.*
 
 @MangaSourceParser("AQUAMANGA", "AquaManga", "en")
 internal class AquaManga(context: MangaLoaderContext) :
-	MadaraParser(context, MangaParserSource.AQUAMANGA, "aquareader.org", 20) {
-	override val withoutAjax = true
-	override val stylePage = ""
+    MadaraParser(context, MangaParserSource.AQUAMANGA, "aquareader.org", 20) {
 
-	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
-		.set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-		.set("Accept-Language", "en-US,en;q=0.5")
-		.set("Referer", "https://$domain/")
-		.set("Sec-Fetch-Dest", "document")
-		.set("Sec-Fetch-Mode", "navigate")
-		.set("Sec-Fetch-Site", "same-origin")
-		.set("Upgrade-Insecure-Requests", "1")
-		.set("X-Requested-With", randomValue)
-		.build()
+    override val withoutAjax = true
+    override val stylePage = ""
 
-	private fun getRandomSubstring(input: String, length: Int): String {
-		val startIndex = Random.nextInt(0, input.length - length + 1)
-		return input.substring(startIndex, startIndex + length)
-	}
+    override val selectChapter = ".aqua-ch-item"
 
-	private val randomLength = Random.Default.nextInt(13, 21)
+    override val availableSortOrders: EnumSet<SortOrder> = EnumSet.of(
+        SortOrder.UPDATED,
+        SortOrder.POPULARITY,
+        SortOrder.NEWEST,
+        SortOrder.ALPHABETICAL,
+    )
 
-	private val decodedString = Base64.getDecoder()
-		.decode(LITTLE_BIT_CURSED_VALUE)
-		.toString(Charsets.UTF_8)
-		.trim()
+    override suspend fun getFilterOptions() = MangaListFilterOptions(
+        availableTags = setOf(
+            MangaTag(key = "academy", title = "Academy", source = source),
+            MangaTag(key = "action", title = "Action", source = source),
+            MangaTag(key = "adaptation", title = "Adaptation", source = source),
+            MangaTag(key = "adventure", title = "Adventure", source = source),
+            MangaTag(key = "comedy", title = "Comedy", source = source),
+            MangaTag(key = "cooking", title = "Cooking", source = source),
+            MangaTag(key = "crime", title = "Crime", source = source),
+            MangaTag(key = "cultivation", title = "Cultivation", source = source),
+            MangaTag(key = "delinquents", title = "Delinquents", source = source),
+            MangaTag(key = "demons", title = "Demons", source = source),
+            MangaTag(key = "drama", title = "Drama", source = source),
+            MangaTag(key = "dungeons", title = "Dungeons", source = source),
+            MangaTag(key = "ecchi", title = "Ecchi", source = source),
+            MangaTag(key = "fantasy", title = "Fantasy", source = source),
+            MangaTag(key = "game", title = "Game", source = source),
+            MangaTag(key = "gore", title = "Gore", source = source),
+            MangaTag(key = "harem", title = "Harem", source = source),
+            MangaTag(key = "historical", title = "Historical", source = source),
+            MangaTag(key = "horror", title = "Horror", source = source),
+            MangaTag(key = "isekai", title = "Isekai", source = source),
+            MangaTag(key = "josei", title = "Josei", source = source),
+            MangaTag(key = "magic", title = "Magic", source = source),
+            MangaTag(key = "manga", title = "Manga", source = source),
+            MangaTag(key = "manhua", title = "Manhua", source = source),
+            MangaTag(key = "manhwa", title = "Manhwa", source = source),
+            MangaTag(key = "martial-arts", title = "Martial Arts", source = source),
+            MangaTag(key = "mecha", title = "Mecha", source = source),
+            MangaTag(key = "medical", title = "Medical", source = source),
+            MangaTag(key = "military", title = "Military", source = source),
+            MangaTag(key = "monsters", title = "Monsters", source = source),
+            MangaTag(key = "murim", title = "Murim", source = source),
+            MangaTag(key = "music", title = "Music", source = source),
+            MangaTag(key = "mystery", title = "Mystery", source = source),
+            MangaTag(key = "necromancer", title = "Necromancer", source = source),
+            MangaTag(key = "ninja", title = "Ninja", source = source),
+            MangaTag(key = "office-workers", title = "Office Workers", source = source),
+            MangaTag(key = "op-mc", title = "OP-MC", source = source),
+            MangaTag(key = "overpowered", title = "Overpowered", source = source),
+            MangaTag(key = "philosophical", title = "Philosophical", source = source),
+            MangaTag(key = "post-apocalyptic", title = "Post-Apocalyptic", source = source),
+            MangaTag(key = "psychological", title = "Psychological", source = source),
+            MangaTag(key = "rebirth", title = "Rebirth", source = source),
+            MangaTag(key = "regression", title = "Regression", source = source),
+            MangaTag(key = "reincarnation", title = "Reincarnation", source = source),
+            MangaTag(key = "returner", title = "Returner", source = source),
+            MangaTag(key = "revenge", title = "Revenge", source = source),
+            MangaTag(key = "romance", title = "Romance", source = source),
+            MangaTag(key = "school-life", title = "School Life", source = source),
+            MangaTag(key = "sci-fi", title = "Sci-fi", source = source),
+            MangaTag(key = "seinen", title = "Seinen", source = source),
+            MangaTag(key = "shounen", title = "Shounen", source = source),
+            MangaTag(key = "slice-of-life", title = "Slice-of-Life", source = source),
+            MangaTag(key = "sports", title = "Sports", source = source),
+            MangaTag(key = "super-power", title = "Super Power", source = source),
+            MangaTag(key = "superhero", title = "Superhero", source = source),
+            MangaTag(key = "supernatural", title = "Supernatural", source = source),
+            MangaTag(key = "survival", title = "Survival", source = source),
+            MangaTag(key = "system", title = "System", source = source),
+            MangaTag(key = "thriller", title = "Thriller", source = source),
+            MangaTag(key = "time-travel", title = "Time Travel", source = source),
+            MangaTag(key = "tower", title = "Tower", source = source),
+            MangaTag(key = "tragedy", title = "Tragedy", source = source),
+            MangaTag(key = "vampire", title = "Vampire", source = source),
+            MangaTag(key = "video-games", title = "Video Games", source = source),
+            MangaTag(key = "villainess", title = "Villainess", source = source),
+            MangaTag(key = "virtual-reality", title = "Virtual Reality", source = source),
+            MangaTag(key = "voilence", title = "Voilence", source = source),
+            MangaTag(key = "webcomic", title = "Webcomic", source = source),
+            MangaTag(key = "wuxia", title = "Wuxia", source = source),
+            MangaTag(key = "zombies", title = "Zombies", source = source),
+        ),
+        availableStates = EnumSet.of(MangaState.ONGOING, MangaState.FINISHED),
+    )
 
-	private val randomStringValue = getRandomSubstring(decodedString, randomLength)
+    override suspend fun getDetails(manga: Manga): Manga {
+        val fullUrl = manga.url.toAbsoluteUrl(domain)
+        val doc = webClient.httpGet(fullUrl).parseHtml()
 
-	private val randomValue = when {
-		Random.nextInt(1, 11) == 1 -> "org.chromium.chrome"
-		else -> randomStringValue
-	}
+        val title = doc.selectFirstOrThrow(".aqua-series-info__title").text()
+        val thumbnail = doc.selectFirstOrThrow(".aqua-series-cover__img").requireSrc()
+        val description = doc.selectFirst(".aqua-series-synopsis")?.html().orEmpty()
+        val status = doc.selectFirst(".aqua-series-meta__status")?.text()
+        val genres = doc.select(".aqua-series-genre-pill").map { it.text() }.toSet()
+        val authors = doc.select(".aqua-series-info__creator-value a").mapToSet { it.ownText() }
 
-	private companion object {
-		private const val LITTLE_BIT_CURSED_VALUE =
-			"ICAgSUFBZ0FFa0FRd0JCQUdjQVNRQkRBRUVBWndCUkFGVUFUZ0JDQUZFQVZRQnNBRUlBVVFCWEFHUUFRZ0JSQURBQVJnQkNBRk1BVlFCR0FFSUFXZ0F3QUVZQVJBQlJBRlVBUmdCVUFGVUFWUUJLQUVVQVVRQlZBRllBUmdCUkFGWUFjQUF6QUZFQWF3QndBRUlBVWdCVkFERUFRZ0JWQUZZQVJnQkRBR0lBYXdCR0FFWUFZUUF3QUVZQVVnQmtBREFBU2dCREFGRUFWUUJrQUdvQVVRQldBRTRBVWdCUkFHc0FVZ0JDQUZJQVZRQnNBRUlBVlFBeUFHUUFRd0JWQUdzQVJnQkhBRllBVlFCR0FGTUFXZ0F3QUVvQU1RQlJBRlVBV2dCR0FGRUFWZ0JhQUZJQVVRQnJBRGtBUWdCU0FGVUFiQUJDQUZZQVZnQkdBRU1BVmdBd0FFWUFSZ0JPQUVVQVJnQldBRm9BTUFCS0FGTUFVUUJWQUdRQWVnQlJBRllBVmdCdUFGRUFhd0JPQUVJQVVnQnJBR3dBUWdCV0FHd0FSZ0JEQUZZQU1BQkdBRVlBVXdCVkFFWUFWd0JrQURBQVNnQXhBRkVBVlFCa0FGSUFVUUJXQUVZQU13QlJBR3dBVWdCQ0FGSUFNd0JPQUVJQVZRQnRBR1FBUXdCU0FEQUFSZ0JIQUZVQVZRQkdBRmNBVlFCVkFFb0FTQUJSQUZVQVdnQktBRkVBVmdCYUFGSUFVUUJzQUZvQVFnQlNBRmNBT1FCQ0FGb0FSZ0JHQUVNQVZRQnJBRVlBUndCV0FGVUFSZ0JYQUZvQU1BQktBRFVBVVFCVkFGb0FSZ0JSQUZZQVdnQnVBRkVBYXdCa0FFSUFVZ0JGQURFQVFnQldBRllBUmdCREFHTUFhd0JHQUVZQVlnQXdBRVlBVWdCYUFEQUFTZ0JVQUZFQVZRQlNBRW9BVVFCV0FGSUFiZ0JSQUdzQVRnQkNBRklBYkFCc0FFSUFWQUJXQUVZQVF3QlNBREFBUmdCR0FGTUFWUUJHQUdFQVZRQlZBRW9BVndCUkFGVUFWZ0JhQUZFQVZnQktBRklBVVFCdEFHZ0FRZ0JTQUVVQVJnQkNBRlVBYlFCa0FFTUFZd0JyQUVZQVJ3QlNBRlVBUmdCWEFGVUFWUUJLQUV3QVVRQlZBRlVBTUFCUkFGWUFWZ0JTQUZFQWJBQmFBRUlBVWdBd0FERUFRZ0JhQUVnQVpBQkRBRlVBYXdCR0FFY0FWd0JWQUVZQVZBQmFBREFBU2dBeEFGRUFWUUJhQUVZQVVRQlhBRVlBYmdCUkFHc0FaQUJDQUZJQVZRQnNBRUlBVmdCWEFHUUFRd0JrQUVVQVJnQkZBR0VBTUFCR0FGSUFXZ0F3QUVvQVZ3QlJBRlVBVWdCQ0FGRUFWZ0JLQUc0QVVRQnJBRklBUWdCU0FHc0FNUUJDQUZRQVZRQkdBRU1BVWdBd0FFWUFSZ0JoQURBQVJnQlhBR1FBTUFCS0FGY0FVUUJWQUZZQVdnQlJBRllBWkFCdUFGRUFiQUJhQUVJQVVnQnNBRllBUWdCVkFESUFaQUJEQUZjQWF3QkdBRWNBVWdCVkFFWUFWd0JWQUZVQVNnQm9BRkVBVlFCV0FGb0FVUUJXQUZZQVVnQlJBR3dBYUFCQ0FGSUFhd0JzQUVJQVZnQlhBR1FBUXdCVkFHc0FSZ0JJQUdRQU1BQkdBR29BVVFCVkFFb0FSQUJSQUZVQVdnQktBRkVBVmdCS0FGSUFVUUJ1QUU0QVFnQlNBRlVBYkFCQ0FGWUFNUUJHQUVNQVZnQnJBRVlBUmdCWEFGVUFSZ0JTQUdRQU1BQktBRkFBVVFCVkFGb0FWZ0JSQUZZQVNnQnVBRkVBYXdCc0FFSUFVZ0JyQURFQVFnQldBR3dBUmdCREFGSUFNQUJHQUVZQVRnQkZBRVlBV0FCYUFEQUFSZ0F6QUZFQVZRQldBRm9BVVFCVkFEVUFRZ0JSQUd3QVNnQkNBRklBYkFCV0FFSUFWd0JyQUVZQVFnQmxBR3NBUmdCSEFGSUFWUUJHQUZjQVdnQXdBRW9BVUFCUkFGVUFXZ0JLQUZFQVZnQldBRklBVVFCdUFFb0FRZ0JTQUdzQWJBQkNBRlVBVndCa0FFTUFWUUF3QUVZQVJ3QldBRlVBUmdCWEFGb0FNQUJLQUVRQVVRQlZBRm9BYWdCUkFGY0FTZ0J1QUZFQWJRQjBBRUlBVWdCVkFERUFRZ0JXQUZnQVpBQkRBR01BYXdCR0FFWUFWd0JWQUVZQVV3QmFBREFBU2dCV0FGRUFWUUJhQUZZQVVRQldBRW9BYmdCUkFHd0FUZ0JDQUZJQWJBQldBRUlBVmdCc0FFWUFRd0JUQURBQVJnQkpBRllBVlFCR0FGWUFWUUJWQUVvQVZ3QlJBRlVBV2dCYUFGRUFWd0JPQUc0QVVRQnNBRW9BUWdCU0FHd0FiQUJDQUZVQWJRQmtBRUlBWlFCckFFWUFSd0JTQUZVQVJnQm9BR1FBTUFCS0FFd0FVUUJWQUZZQVNnQlJBRllBVmdCdUFGRUFXQUJzQUVJQVVnQlVBRklBUWdCVkFGY0FaQUJEQUZZQVJRQkdBRWNBVmdCVkFFWUFVd0JhQURBQVNnQkVBRkVBVlFCYUFIWUFVUUJWQURFQVFnQlJBR3NBWkFCQ0FGSUFWZ0JHQUVJQVZnQldBRVlBUXdCV0FHc0FSZ0JHQUZjQVZRQkdBRlFBV2dBd0FFb0FVd0JSQUZVQVdnQldBRkVBVmdCS0FHNEFVUUJ1QUZZQVFnQlNBR3NBVmdCQ0FGWUFiQUJHQUVNQVVnQnJBRVlBUlFCaEFEQUFSZ0JXQUZFQVZRQktBRlVBVVFCVkFGWUFSZ0JSQUZZQWNBQXpBRkVBYXdCd0FFSUFVZ0JWQURFQVFnQlZBRllBUmdCREFHSUFhd0JHQUVZQVlRQXdBRVlBVWdCa0FEQUFTZ0JEQUZFQVZRQmtBR29BVVFCV0FFNEFVZ0JSQUdzQVNnQkNBRklBUkFCQ0FFSUFWUUJHQUVZQVFnQmFBREFBUmdCRUFGRUFWUUJHQUVvQVVRQlZBRVlBYmdCUkFGVUFUZ0JDQUZFQVZRQnNBRUlBVVFCWEFHTUFad0JKQUVNQVFRQm5BRWtBUXdCQkFEMEFJQUFnQUNBQUlBQT0gICA="
-	}
+        val tags = genres.mapTo(mutableSetOf()) {
+            MangaTag(title = it, key = it.lowercase().replace(' ', '-'), source = source)
+        }
+        val statusText = status?.lowercase().orEmpty()
+        val state = when (statusText) {
+            in ongoing -> MangaState.ONGOING
+            in finished -> MangaState.FINISHED
+            in abandoned -> MangaState.ABANDONED
+            in paused -> MangaState.PAUSED
+            else -> null
+        }
+
+        val chapters = getChapters(manga, doc)
+        return manga.copy(
+            title = title,
+            coverUrl = thumbnail,
+            description = description,
+            tags = tags,
+            state = state,
+            authors = authors.filterNot { it.isBlank() }.toSet(),
+            chapters = chapters,
+        )
+    }
+
+    override suspend fun getChapters(manga: Manga, doc: Document): List<MangaChapter> {
+        return doc.select(selectChapter).mapChapters(reversed = true) { i, el ->
+            val a = el.selectFirstOrThrow("a")
+            val href = a.attrAsRelativeUrl("href")
+            val name = el.selectFirstOrThrow(".aqua-ch-item__name").text()
+            val dateText = el.selectFirst(".aqua-ch-item__time")?.text()?.trim()
+            MangaChapter(
+                id = generateUid(href),
+                url = href + stylePage,
+                title = name,
+                number = i + 1f,
+                volume = 0,
+                uploadDate = parseChapterDate(dateText),
+                source = source,
+                scanlator = null,
+                branch = null,
+            )
+        }
+    }
+
+    private fun parseChapterDate(text: String?): Long {
+        if (text.isNullOrBlank()) return 0L
+
+        val relativeRegex = Regex(
+            """(\d+)\s+(years?|months?|weeks?|days?|hours?|mins?|minutes?|sec(?:onds?)?)\s+ago""",
+            RegexOption.IGNORE_CASE
+        )
+        val match = relativeRegex.matchEntire(text)
+        if (match != null) {
+            val number = match.groupValues[1].toInt()
+            val unit = match.groupValues[2].lowercase()
+            val cal = Calendar.getInstance()
+            when {
+                unit.startsWith("year")   -> cal.add(Calendar.YEAR, -number)
+                unit.startsWith("month")  -> cal.add(Calendar.MONTH, -number)
+                unit.startsWith("week")   -> cal.add(Calendar.DAY_OF_MONTH, -number * 7)
+                unit.startsWith("day")    -> cal.add(Calendar.DAY_OF_MONTH, -number)
+                unit.startsWith("hour")   -> cal.add(Calendar.HOUR, -number)
+                unit.startsWith("min")    -> cal.add(Calendar.MINUTE, -number)
+                unit.startsWith("sec")    -> cal.add(Calendar.SECOND, -number)
+            }
+            return cal.timeInMillis
+        }
+
+        val formats = listOf(
+            SimpleDateFormat("MMM d, yyyy", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") },
+            SimpleDateFormat("MMM dd, yyyy", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") },
+            SimpleDateFormat("MMMM d, yyyy", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") },
+        )
+        for (fmt in formats) {
+            try {
+                return fmt.parse(text)?.time ?: 0L
+            } catch (_: Exception) {}
+        }
+
+        return 0L
+    }
 }
