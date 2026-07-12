@@ -26,11 +26,12 @@ internal class DoujinDesuParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.DOUJINDESU, pageSize = 24) {
 
 	override val configKeyDomain: ConfigKey.Domain
-		get() = ConfigKey.Domain("doujin.desu.xxx")
+		get() = ConfigKey.Domain("doujindesu.tv", "doujindesu.xxx", "doujin.desu.xxx")
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
 		keys.add(userAgentKey)
+		keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
 	}
 
 	override val availableSortOrders: Set<SortOrder>

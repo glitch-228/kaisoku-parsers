@@ -24,7 +24,7 @@ import java.util.Locale
 
 @MangaSourceParser("HENTAIORIGINES", "Hentai Origines", "fr", ContentType.HENTAI)
 internal class HentaiOrigines(context: MangaLoaderContext) :
-	MadaraParser(context, MangaParserSource.HENTAIORIGINES, "hentai-origines.fr") {
+	MadaraParser(context, MangaParserSource.HENTAIORIGINES, "hentai-origines.com") {
 
 	override val datePattern = "MMMM d, yyyy"
 	override val listUrl = "catalogue/"

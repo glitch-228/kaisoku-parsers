@@ -36,6 +36,7 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 		SortOrder.POPULARITY,
 		SortOrder.NEWEST,
 		SortOrder.ALPHABETICAL,
+		SortOrder.RELEVANCE,
 	)
 
 	override suspend fun getFilterOptions() = MangaListFilterOptions(
@@ -112,6 +113,7 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 		}
 		return when (order) {
 			SortOrder.POPULARITY -> getPopularPage(page)
+			SortOrder.RELEVANCE -> getLatestPage(page, "tracked")
 			else -> getLatestPage(page)
 		}
 	}
@@ -124,9 +126,10 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 		return parseViewAllPage(url)
 	}
 
-	private suspend fun getLatestPage(page: Int): List<Manga> {
+	private suspend fun getLatestPage(page: Int, sort: String? = null): List<Manga> {
 		val url = "$baseUrl/view-all/latest-updates.data".toHttpUrl().newBuilder().apply {
 			if (page > 1) addQueryParameter("page", page.toString())
+			sort?.let { addQueryParameter("sort", it) }
 			addQueryParameter("_routes", "pages/ViewAllPage")
 		}.build().toString()
 		return parseViewAllPage(url)

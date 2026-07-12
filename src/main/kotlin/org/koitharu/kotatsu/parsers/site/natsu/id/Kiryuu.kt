@@ -15,7 +15,7 @@ import org.koitharu.kotatsu.parsers.util.parseHtml
 internal class Kiryuu(context: MangaLoaderContext) :
     NatsuParser(context, MangaParserSource.KIRYUU, pageSize = 24) {
 
-    override val configKeyDomain = ConfigKey.Domain("v5.kiryuu.to", "v1.kiryuu.to", "kiryuu03.com")
+    override val configKeyDomain = ConfigKey.Domain("v6.kiryuu.to", "v5.kiryuu.to", "v1.kiryuu.to", "kiryuu03.com")
 
     override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
         super.onCreateConfig(keys)

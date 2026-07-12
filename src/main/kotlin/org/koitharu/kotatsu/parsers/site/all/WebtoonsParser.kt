@@ -182,16 +182,18 @@ internal abstract class WebtoonsParser(
 	)
 
 	override suspend fun getList(offset: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
+		val page = offset / PAGE_SIZE + 1
+		val pageOffset = offset % PAGE_SIZE
 		val document = when {
 			!filter.query.isNullOrEmpty() -> {
-				val searchUrl = "https://$domain/$languageCode/search?keyword=${filter.query.urlEncoded()}"
+				val searchUrl = "https://$domain/$languageCode/search?keyword=${filter.query.urlEncoded()}&page=$page"
 				webClient.httpGet(searchUrl).parseHtml()
 			}
 
 			filter.tags.isNotEmpty() -> {
 				val selectedGenre = filter.tags.first()
 				val sortParam = getSortOrderParam(order)
-				val genreUrl = "https://$domain/$languageCode/genres/${selectedGenre.key}?sortOrder=$sortParam"
+				val genreUrl = "https://$domain/$languageCode/genres/${selectedGenre.key}?sortOrder=$sortParam&page=$page"
 				webClient.httpGet(genreUrl).parseHtml()
 			}
 
@@ -202,7 +204,7 @@ internal abstract class WebtoonsParser(
 					SortOrder.UPDATED -> "originals"
 					else -> "popular"
 				}
-				val rankingUrl = "https://$domain/$languageCode/ranking/$rankingType"
+				val rankingUrl = "https://$domain/$languageCode/ranking/$rankingType?page=$page"
 				webClient.httpGet(rankingUrl).parseHtml()
 			}
 		}
@@ -211,8 +213,8 @@ internal abstract class WebtoonsParser(
 
 		return document.select(".webtoon_list li a, .card_wrap .card_item a")
 			.mapNotNull { element -> createMangaFromElementOrNull(element, selectedGenreForManga) }
-			.drop(offset)
-			.take(20)
+			.drop(pageOffset)
+			.take(PAGE_SIZE)
 	}
 
 	private fun createMangaFromElementOrNull(
@@ -254,6 +256,7 @@ internal abstract class WebtoonsParser(
 	}
 
 	private companion object {
+		const val PAGE_SIZE = 20
 		val TITLE_NO_REGEX = Regex("title_no=(\\d+)")
 	}
 
@@ -279,10 +282,38 @@ internal abstract class WebtoonsParser(
 			}
 		}
 
-		return extractImages("div#_imageList > img")
+		val pages = extractImages("div#_imageList > img")
 			.ifEmpty { extractImages("canvas[data-url]") }
 			.ifEmpty { extractImages("img[src*='$staticDomain'], img[data-url*='$staticDomain']") }
+		if (pages.isNotEmpty()) return pages
+		return fetchMotionToonPages(doc)
 			.ifEmpty { throw ParseException("No images found in chapter.", chapter.url) }
+	}
+
+	private suspend fun fetchMotionToonPages(doc: org.jsoup.nodes.Document): List<MangaPage> {
+		val html = doc.toString()
+		val documentUrl = Regex("documentURL:.*?'(.*?)'").find(html)?.groupValues?.get(1)
+			?: return emptyList()
+		val imageBase = Regex("jpg:.*?'(.*?)\\{").find(html)?.groupValues?.get(1)
+			?: return emptyList()
+		return runCatching {
+			val images = webClient.httpGet(documentUrl).parseJson()
+				.optJSONObject("assets")
+				?.optJSONObject("images")
+				?: return@runCatching emptyList()
+			images.keySet()
+				.filter { "layer" in it }
+				.mapIndexedNotNull { index, key ->
+					images.optString(key).takeIf { it.isNotBlank() }?.let { path ->
+						MangaPage(
+							id = generateUid("motion-$index"),
+							url = imageBase + path,
+							preview = null,
+							source = source,
+						)
+					}
+				}
+		}.getOrDefault(emptyList())
 	}
 
 	@MangaSourceParser("WEBTOONS_EN", "Webtoons English", "en", type = ContentType.MANGA)

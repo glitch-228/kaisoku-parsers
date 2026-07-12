@@ -6,6 +6,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
@@ -29,6 +30,7 @@ import org.koitharu.kotatsu.parsers.util.urlDecode
 import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.util.EnumSet
 
+@Broken("Domain is no longer resolvable")
 @MangaSourceParser("ANIMESAMA", "AnimeSama", "fr")
 internal class AnimeSama(context: MangaLoaderContext) :
 	PagedMangaParser(context, source = MangaParserSource.ANIMESAMA, 96) {

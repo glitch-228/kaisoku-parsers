@@ -26,7 +26,6 @@ import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
-import java.net.HttpURLConnection
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -467,18 +466,22 @@ internal abstract class GroupleParser(
     }
 
     private suspend fun advancedSearch(offset: Int, order: SortOrder, filter: MangaListFilter): Response {
-        val tagsMap = tagsIndex.get()
+        val tagsMap = if (filter.tags.isNotEmpty() || filter.tagsExclude.isNotEmpty()) {
+            tagsIndex.get()
+        } else {
+            null
+        }
         val url = urlBuilder()
             .addPathSegment("search")
             .addPathSegment("advancedResults")
         url.addQueryParameter("q", filter.query)
         url.addQueryParameter("offset", offset.toString())
         filter.tags.forEach { tag ->
-            val tagId = requireNotNull(tagsMap[tag.title.lowercase()]) { "Tag ${tag.title} not found" }
+            val tagId = requireNotNull(tagsMap?.get(tag.title.lowercase())) { "Tag ${tag.title} not found" }
             url.addQueryParameter(tagId, "in")
         }
         filter.tagsExclude.forEach { tag ->
-            val tagId = requireNotNull(tagsMap[tag.title.lowercase()]) { "Tag ${tag.title} not found" }
+            val tagId = requireNotNull(tagsMap?.get(tag.title.lowercase())) { "Tag ${tag.title} not found" }
             url.addQueryParameter(tagId, "ex")
         }
         url.addQueryParameter(
@@ -682,14 +685,6 @@ internal abstract class GroupleParser(
         if (lastPathSegment == "login") {
             closeQuietly()
             throw AuthRequiredException(source)
-        }
-        if (code == HttpURLConnection.HTTP_NOT_FOUND) {
-            if (!hasAuthCookie()) {
-                closeQuietly()
-                throw AuthRequiredException(source)
-            } else {
-                return newBuilder().code(HttpURLConnection.HTTP_OK).build()
-            }
         }
         return this
     }

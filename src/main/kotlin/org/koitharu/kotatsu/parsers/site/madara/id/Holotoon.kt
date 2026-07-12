@@ -15,6 +15,15 @@ internal class Holotoon(context: MangaLoaderContext) :
 
     override val configKeyDomain = ConfigKey.Domain("v1.holotoon.site")
 
+    override val userAgentKey = ConfigKey.UserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    )
+
+    override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
+        super.onCreateConfig(keys)
+        keys.add(userAgentKey)
+    }
+
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
         SortOrder.POPULARITY,
@@ -24,7 +33,7 @@ internal class Holotoon(context: MangaLoaderContext) :
 
     override val filterCapabilities: MangaListFilterCapabilities
         get() = MangaListFilterCapabilities(
-            isMultipleTagsSupported = true,
+            isMultipleTagsSupported = false,
             isSearchSupported = true,
             isSearchWithFiltersSupported = true,
         )
@@ -203,7 +212,12 @@ internal class Holotoon(context: MangaLoaderContext) :
         val images = doc.select("div#reader-pages img, main img[src*='/image/']")
         return images.mapNotNull { img ->
             val url = img.attrOrNull("src")?.nullIfEmpty() ?: return@mapNotNull null
-            if (url.contains("/chapter-header/") || url.contains("/chapter-footer/")) return@mapNotNull null
+            if (
+                url.contains("/chapter-header/") || url.contains("/chapter-footer/") ||
+                url.contains("/covers/") || url.contains("/reactions/") ||
+                url.contains("/avatars/") || url.contains("/shop/") ||
+                url.contains("/site-logo/")
+            ) return@mapNotNull null
             MangaPage(
                 id = generateUid(url),
                 url = url,
