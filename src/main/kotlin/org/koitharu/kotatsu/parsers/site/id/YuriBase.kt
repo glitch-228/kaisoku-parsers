@@ -123,13 +123,13 @@ internal class YuriBase(context: MangaLoaderContext) :
 
 		val searchUrl = "https://firestore.googleapis.com/v1/projects/ybase2026/databases/(default)/documents:runQuery".toHttpUrl()
 		val responseArray = webClient.httpPost(searchUrl, payload).parseJsonArray()
-		
+
 		val list = ArrayList<Manga>()
 		for (i in 0 until responseArray.length()) {
 			val doc = responseArray.optJSONObject(i)?.optJSONObject("document") ?: continue
 			val fields = doc.optJSONObject("fields") ?: continue
 			val slug = fields.optJSONObject("mangaSlug")?.optString("stringValue") ?: continue
-			
+
 			list.add(
 				Manga(
 					id = generateUid(slug),
@@ -253,7 +253,7 @@ internal class YuriBase(context: MangaLoaderContext) :
 					)
 				)
 			}
-			
+
 			chapters.sortByDescending { it.number }
 		}
 

@@ -155,7 +155,7 @@ abstract class HiperParser(
     override suspend fun getFilterOptions() = MangaListFilterOptions(
         availableTags = emptySet(),
     )
-    
+
     override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
         val q = filter.query?.trim().orEmpty()
         val sort = when (order) {

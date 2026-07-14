@@ -317,6 +317,7 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 		return manga.copy(
 			title = title,
 			coverUrl = coverUrl,
+			rating = ratingValue?.div(10f)?.coerceIn(0f, 1f) ?: RATING_UNKNOWN,
 			description = richDescription,
 			altTitles = altTitles,
 			tags = allTags,

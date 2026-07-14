@@ -14,6 +14,7 @@ import okhttp3.Response
 import okhttp3.internal.closeQuietly
 import okio.IOException
 import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
@@ -652,20 +653,39 @@ internal abstract class GroupleParser(
         }
     }
 
-    private suspend fun fetchTagsMap(): ScatterMap<String, String> {
-        val url = "https://$domain/search/advanced"
-        val properties =
-            webClient.httpGet(url).parseHtml().body().selectFirst("form.search-form")?.select("div.form-group")
-                ?.find { it.selectFirst("li.property") != null }
-                ?.select("li.property")
-                ?: throw ParseException("Genres filter element not found", url)
-        val result = MutableScatterMap<String, String>(properties.size)
-        properties.forEach { li ->
-            val name = li.text().lowercase()
-            val id = li.selectFirstOrThrow("input").id()
-            result[name] = id
-        }
-        return result
+	private suspend fun fetchTagsMap(): ScatterMap<String, String> {
+		val url = "https://$domain/search/advanced"
+		val document = webClient.httpGet(url).parseHtml()
+		val result = MutableScatterMap<String, String>()
+
+		document.select("script:containsData(window.__FILTERS.)").forEach { script ->
+			FILTERS_REGEX.findAll(script.data()).forEach { match ->
+				val type = match.groupValues[1]
+				val prefix = if (type == "searchFilters") "s_" else "el_"
+				val values = JSONObject(match.groupValues[2])
+				values.keys().forEach { id ->
+					val title = values.optString(id)
+					if (title.isNotBlank()) {
+						result[title.lowercase()] = prefix + id.lowercase(Locale.ROOT)
+					}
+				}
+			}
+		}
+
+		if (result.isEmpty()) {
+			document.body().selectFirst("form.search-form")?.select("div.form-group")
+				?.find { it.selectFirst("li.property") != null }
+				?.select("li.property")
+				?.forEach { li ->
+					val name = li.text().lowercase()
+					val id = li.selectFirstOrThrow("input").id()
+					result[name] = id
+				}
+		}
+		if (result.isEmpty()) {
+			throw ParseException("Genres filter element not found", url)
+		}
+		return result
     }
 
     private fun String.withQueryParam(name: String, value: String?): String {
@@ -692,8 +712,12 @@ internal abstract class GroupleParser(
     private fun hasAuthCookie() = context.cookieJar.getCookies(domain).any { it.name == "gwt" }
 
     private companion object {
-        private val HREF_VOLUME_REGEX = Regex("""/vol(\d+)/""", RegexOption.IGNORE_CASE)
-        private val HREF_CHAPTER_NUMBER_REGEX = Regex("""/vol\d+/([0-9]+(?:[.,]\d+)?)""", RegexOption.IGNORE_CASE)
-        private val TITLE_CHAPTER_NUMBER_REGEX = Regex("""([0-9]+(?:[.,]\d+)?)\s*$""")
-    }
+		private val HREF_VOLUME_REGEX = Regex("""/vol(\d+)/""", RegexOption.IGNORE_CASE)
+		private val HREF_CHAPTER_NUMBER_REGEX = Regex("""/vol\d+/([0-9]+(?:[.,]\d+)?)""", RegexOption.IGNORE_CASE)
+		private val TITLE_CHAPTER_NUMBER_REGEX = Regex("""([0-9]+(?:[.,]\d+)?)\s*$""")
+		private val FILTERS_REGEX = Regex(
+			"""window\.__FILTERS\.(genre|category|limitation|another|searchFilters)\s*=\s*([{].*?[}])\s*;""",
+			RegexOption.DOT_MATCHES_ALL,
+		)
+	}
 }

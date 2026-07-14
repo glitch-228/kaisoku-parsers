@@ -146,8 +146,15 @@ internal class AinzScans(context: MangaLoaderContext) :
                 val slug = obj.optString("slug")
                 if (slug.isEmpty()) continue
 
-                val relativeUrl = "/comic/$slug"
-                val rating = obj.optString("rating_average").toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN
+				val relativeUrl = "/comic/$slug"
+				val altTitles = obj.optJSONArray("alternative_titles")?.let { titles ->
+					buildSet {
+						for (index in 0 until titles.length()) {
+							titles.optString(index).trim().takeIf { it.isNotEmpty() }?.let(::add)
+						}
+					}
+				}.orEmpty()
+				val rating = obj.optString("rating_average").toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN
                 val state = when (obj.optString("comic_status").uppercase()) {
                     "ONGOING" -> MangaState.ONGOING
                     "COMPLETED" -> MangaState.FINISHED
@@ -159,7 +166,7 @@ internal class AinzScans(context: MangaLoaderContext) :
                     id = generateUid(relativeUrl),
                     url = relativeUrl,
                     title = obj.optString("title").ifEmpty { slug },
-                    altTitles = emptySet(),
+					altTitles = altTitles,
                     publicUrl = "https://$domain/comic/$slug",
                     rating = rating,
                     contentRating = ContentRating.SAFE,
@@ -192,8 +199,15 @@ internal class AinzScans(context: MangaLoaderContext) :
             val slug = obj.optString("slug")
             val relativeUrl = "/comic/$slug"
 
-            val description = obj.optString("synopsis").nullIfEmpty()
-            val rating = obj.optString("rating_average").toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN
+			val description = obj.optString("synopsis").nullIfEmpty()
+			val altTitles = obj.optJSONArray("alternative_titles")?.let { titles ->
+				buildSet {
+					for (index in 0 until titles.length()) {
+						titles.optString(index).trim().takeIf { it.isNotEmpty() }?.let(::add)
+					}
+				}
+			}.orEmpty()
+			val rating = obj.optString("rating_average").toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN
             val state = when (obj.optString("comic_status").uppercase()) {
                 "ONGOING" -> MangaState.ONGOING
                 "COMPLETED" -> MangaState.FINISHED
@@ -213,12 +227,16 @@ internal class AinzScans(context: MangaLoaderContext) :
 
             val chapters = parseUnitsJson(obj.optJSONArray("units"), relativeUrl, slug)
 
-            return manga.copy(
-                title = obj.optString("title").takeIf { it.isNotEmpty() } ?: manga.title,
-                description = description,
+			return manga.copy(
+				title = obj.optString("title").takeIf { it.isNotEmpty() } ?: manga.title,
+				altTitles = altTitles,
+				description = description,
                 rating = rating,
                 state = state,
-                authors = setOfNotNull(obj.optString("author_name").takeIf { it.isNotEmpty() }),
+				authors = setOfNotNull(
+					obj.optString("author_name").takeIf { it.isNotEmpty() },
+					obj.optString("artist_name").takeIf { it.isNotEmpty() },
+				),
                 tags = genres,
                 chapters = chapters,
             )
