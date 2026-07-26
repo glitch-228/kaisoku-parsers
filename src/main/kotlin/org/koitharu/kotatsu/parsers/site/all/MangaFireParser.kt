@@ -5,6 +5,7 @@ import okhttp3.Interceptor
 import org.jsoup.Jsoup
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.bitmap.Rect
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -551,25 +552,41 @@ internal abstract class MangaFireParser(
         return sb.toString()
     }
 
+    /*
+     * mangafire.to was rebuilt as a client-rendered SPA on the same platform Comix now runs: every
+     * page (home, /filter, /title/...) returns the same ~3 KB shell carrying only `window.__config`
+     * and `window.__build`, with no manga markup for these selectors to find. Content comes from
+     * `GET /api/titles` and friends, which answer 403 `{"message":"Missing token."}` without the
+     * short-lived `_` signature the SPA generates (`/api/top-titles` and `/api/me` are open, but not
+     * enough to browse or read). Reviving this needs the WebView + JSON.parse capture architecture
+     * ComixParser already uses, which is a rewrite rather than a selector fix.
+     */
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_EN", "MangaFire English", "en")
     class English(context: MangaLoaderContext) : MangaFireParser(context, MangaParserSource.MANGAFIRE_EN, "en")
 
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_ES", "MangaFire Spanish", "es")
     class Spanish(context: MangaLoaderContext) : MangaFireParser(context, MangaParserSource.MANGAFIRE_ES, "es")
 
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_ESLA", "MangaFire Spanish (Latim)", "es")
     class SpanishLatim(context: MangaLoaderContext) :
         MangaFireParser(context, MangaParserSource.MANGAFIRE_ESLA, "es-la")
 
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_FR", "MangaFire French", "fr")
     class French(context: MangaLoaderContext) : MangaFireParser(context, MangaParserSource.MANGAFIRE_FR, "fr")
 
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_JA", "MangaFire Japanese", "ja")
     class Japanese(context: MangaLoaderContext) : MangaFireParser(context, MangaParserSource.MANGAFIRE_JA, "ja")
 
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_PT", "MangaFire Portuguese", "pt")
     class Portuguese(context: MangaLoaderContext) : MangaFireParser(context, MangaParserSource.MANGAFIRE_PT, "pt")
 
+    @Broken("Site is now an SPA; API needs a signed token — needs a WebView-capture rewrite")
     @MangaSourceParser("MANGAFIRE_PTBR", "MangaFire Portuguese (Brazil)", "pt")
     class PortugueseBR(context: MangaLoaderContext) :
         MangaFireParser(context, MangaParserSource.MANGAFIRE_PTBR, "pt-br")
