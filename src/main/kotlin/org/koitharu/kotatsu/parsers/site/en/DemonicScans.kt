@@ -11,6 +11,8 @@ import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.*
 
+internal const val DEMONIC_PAGE_SELECTOR = "div > img.imgholder[alt]"
+
 @MangaSourceParser("DEMONICSCANS", "DemonicScans", "en")
 internal class DemonicScans(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.DEMONICSCANS, 25) {
@@ -194,7 +196,7 @@ internal class DemonicScans(context: MangaLoaderContext) :
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val doc = webClient.httpGet(chapter.url).parseHtml()
-        return doc.select("div > img.imgholder").map {
+        return doc.select(DEMONIC_PAGE_SELECTOR).map {
             val url = it.requireSrc()
             MangaPage(
                 id = generateUid(url),
