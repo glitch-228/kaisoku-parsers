@@ -27,6 +27,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaListFilterOptions
 import org.koitharu.kotatsu.parsers.model.MangaPage
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
+import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.model.MangaState
 import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
@@ -39,6 +40,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSONToSet
 import org.koitharu.kotatsu.parsers.util.secretstream.SecretStream
 import org.koitharu.kotatsu.parsers.util.secretstream.State
 import org.koitharu.kotatsu.parsers.util.secretstream.X25519
+import org.koitharu.kotatsu.parsers.util.parseJsonArray
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import java.io.IOException
 import java.security.MessageDigest
@@ -97,10 +99,12 @@ internal abstract class PamParser(
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
 		keys.add(userAgentKey)
+		// The sites sit behind Cloudflare, and WebView's own `X-Requested-With` gets the solver
+		// challenged in a loop unless it is stripped.
+		keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
 	}
 
 	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
-		.set("Origin", "https://$domain")
 		.set("Referer", "https://$domain/")
 		.build()
 
@@ -127,10 +131,8 @@ internal abstract class PamParser(
 				.addPathSegments("api/v1/search/series")
 				.addQueryParameter("q", filter.query)
 				.build()
-			return fetchJson(url, isInertia = false)
-				.optJSONArray("data")
-				?.mapJSON { it.toManga() }
-				?: emptyList()
+			return webClient.httpGet(url, searchHeaders()).parseJsonArray()
+				.mapJSON { it.toManga() }
 		}
 		val url = urlBuilder().apply {
 			addPathSegment("library")
@@ -168,9 +170,7 @@ internal abstract class PamParser(
 				},
 			)
 		}.build()
-		// The library answers with a bare `{series: {data, meta}}` payload, but falls back to the
-		// full Inertia envelope when it is served as HTML.
-		return fetchJson(url, isInertia = false).unwrapProps()
+		return fetchProps(url)
 			.optJSONObject("series")
 			?.optJSONArray("data")
 			?.mapJSON { it.toManga() }
@@ -233,64 +233,46 @@ internal abstract class PamParser(
 
 	// region Inertia
 
-	/**
-	 * The Inertia asset version, harvested from any page we load. Sending a stale one makes the
-	 * server answer 409, so it is refreshed from every response and dropped on mismatch.
-	 */
-	@Volatile
-	private var inertiaVersion: String? = null
-
 	private fun urlBuilder() = HttpUrl.Builder().scheme("https").host(domain)
 
 	private fun String.toHttpUrlOrFail(): HttpUrl =
 		toHttpUrlOrNull() ?: throw ParseException("Invalid url", this)
 
-	private fun apiHeaders(isInertia: Boolean): Headers = getRequestHeaders().newBuilder().apply {
-		set("Accept", "application/json, text/html;q=0.9")
+	/**
+	 * Every page is fetched as a plain navigation. Inertia would also serve the same state as JSON
+	 * in exchange for `X-Requested-With` / `X-Inertia` headers, but Cloudflare flags those, and a
+	 * challenge raised on them survives the WebView solver: it clears normal navigations, then the
+	 * next header-carrying request is challenged again. Reading `#app[data-page]` costs one HTML
+	 * document and keeps every request shaped like the one the solver actually gets clearance for.
+	 */
+	private fun pageHeaders(): Headers = getRequestHeaders().newBuilder()
+		.set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		.build()
+
+	/** The search endpoint has no page equivalent, so it is the one request that must be an XHR. */
+	private fun searchHeaders(): Headers = getRequestHeaders().newBuilder().apply {
+		set("Accept", "application/json")
 		set("X-Requested-With", "XMLHttpRequest")
+		// Only an XHR carries an Origin; sending it on a navigation is itself a bot signal.
+		set("Origin", "https://$domain")
 		context.cookieJar.getCookies(domain)
 			.firstOrNull { it.name == "XSRF-TOKEN" }
 			?.let { set("X-XSRF-TOKEN", it.value) }
-		val version = inertiaVersion
-		if (isInertia && version != null) {
-			set("X-Inertia", "true")
-			set("X-Inertia-Version", version)
-		}
 	}.build()
 
-	/**
-	 * Loads a page and returns its Inertia envelope. The site answers the same
-	 * `{component, props, version}` object either as JSON (when asked with the Inertia headers) or
-	 * embedded in `#app[data-page]`, so both shapes are accepted — that also bootstraps
-	 * [inertiaVersion] on the first request, when we do not have one yet.
-	 */
-	private suspend fun fetchJson(url: HttpUrl, isInertia: Boolean): JSONObject {
-		val body = webClient.httpGet(url, apiHeaders(isInertia)).use { it.body.string() }
-		val envelope = body.trimStart().let { trimmed ->
-			if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-				JSONObject(if (trimmed.startsWith('[')) "{\"data\":$trimmed}" else trimmed)
-			} else {
-				val dataPage = Jsoup.parse(body, url.toString())
-					.selectFirst("#app")
-					?.attr("data-page")
-					?: throw ParseException("Page state not found", url.toString())
-				JSONObject(dataPage)
-			}
-		}
-		envelope.getStringOrNull("version")?.let { inertiaVersion = it }
-		return envelope
-	}
+	private suspend fun fetchProps(url: HttpUrl): JSONObject =
+		parseEnvelope(webClient.httpGet(url, pageHeaders()).use { it.body.string() }, url).unwrapProps()
 
-	private suspend fun fetchProps(url: HttpUrl): JSONObject {
-		val envelope = try {
-			fetchJson(url, isInertia = true)
-		} catch (e: IOException) {
-			// A stale asset version is answered with 409; dropping it makes the retry ask for plain
-			// HTML, which carries a fresh version for subsequent requests.
-			inertiaVersion = null
-			fetchJson(url, isInertia = true)
+	/** Accepts the state either embedded in the document or served bare, whichever the site sends. */
+	private fun parseEnvelope(body: String, url: HttpUrl): JSONObject {
+		if (body.trimStart().startsWith('{')) {
+			return JSONObject(body)
 		}
-		return envelope.unwrapProps()
+		val dataPage = Jsoup.parse(body, url.toString())
+			.selectFirst("#app")
+			?.attr("data-page")
+			?: throw ParseException("Page state not found", url.toString())
+		return JSONObject(dataPage)
 	}
 
 	private fun JSONObject.unwrapProps(): JSONObject = optJSONObject("props") ?: this
@@ -377,17 +359,18 @@ internal abstract class PamParser(
 			.build()
 		val request = Request.Builder()
 			.url(chapterUrl)
-			.headers(apiHeaders(isInertia = false))
+			.headers(pageHeaders())
+			// Built outside webClient, so the source tag it normally adds has to be set here —
+			// without it a Cloudflare challenge cannot be attributed back to this source.
+			.tag(MangaSource::class.java, source)
 			.build()
 		val envelope = context.httpClient.newCall(request).execute().use { response ->
 			if (!response.isSuccessful) {
 				return null
 			}
-			val body = response.body.string()
-			val dataPage = Jsoup.parse(body, chapterUrl.toString()).selectFirst("#app")?.attr("data-page")
-			JSONObject(dataPage ?: body)
+			parseEnvelope(response.body.string(), chapterUrl)
 		}
-		val props = envelope.optJSONObject("props") ?: envelope
+		val props = envelope.unwrapProps()
 		if (!props.has("server_pubkey") || !props.has("chapter_token")) {
 			return null
 		}
