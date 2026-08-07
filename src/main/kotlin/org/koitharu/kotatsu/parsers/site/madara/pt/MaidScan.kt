@@ -30,6 +30,8 @@ import org.koitharu.kotatsu.parsers.util.parseSafe
 import org.koitharu.kotatsu.parsers.util.toTitleCase
 import java.text.SimpleDateFormat
 import java.util.EnumSet
+import java.util.Locale
+import java.util.TimeZone
 
 @MangaSourceParser("MAIDSCAN", "MaidScan", "pt")
 internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
@@ -38,9 +40,9 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 	pageSize = 24,
 	searchPageSize = 15,
 ) {
-	override val configKeyDomain = ConfigKey.Domain("empreguetes.xyz")
+	override val configKeyDomain = ConfigKey.Domain("verdinha.wtf", "empreguetes.xyz")
 	private val apiUrl = "https://api.verdinha.wtf"
-	private val cdnUrl = "https://cdn.sussytoons.site"
+	private val cdnUrl = "https://cdn.verdinha.wtf"
 	private val scanId = 3
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -82,7 +84,10 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			.add("scan-id", scanId.toString())
 			.build()
 
-	private val chapterDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", sourceLocale)
+	// `cap_criado_em` is ISO-8601 in UTC, e.g. "2026-07-19T19:57:52.501Z".
+	private val chapterDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
+		timeZone = TimeZone.getTimeZone("UTC")
+	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val url = buildSearchUrl(page, filter, order)
@@ -243,10 +248,11 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 
 		return MangaChapter(
 			id = generateUid(chapterId.toLong()),
-			title = chapterName,
+			// Chapters that have not been unlocked yet still show up in the list.
+			title = if (!json.optBoolean("cap_liberado", true)) "🔒 $chapterName" else chapterName,
 			number = chapterNumber,
 			url = "/capitulo/$chapterId/$obraId",
-			uploadDate = 0, // No date field in this API response
+			uploadDate = chapterDateFormat.parseSafe(json.optString("cap_criado_em")),
 			source = source,
 			volume = 0,
 			scanlator = null,
@@ -281,16 +287,20 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 
 			if (pageSrc.isEmpty()) return@mapJSONNotNull null
 
+			// Each page carries a ready-made `path` relative to the CDN root
+			// ("scans/3/obras/15083/capitulos/1/33353.png"); only fall back to
+			// rebuilding it from the parts when that is missing.
+			val pagePath = pageJson.optString("path").takeIf { it.isNotEmpty() && it != "null" }
+
 			val imageUrl = when {
 				// Already a full URL
 				pageSrc.startsWith("http") -> pageSrc
+				pagePath != null -> "$cdnUrl/${pagePath.trimStart('/')}"
 				// WordPress manga path, looks like: "manga_.../hash/001.webp"
 				pageSrc.startsWith("manga_") -> "$cdnUrl/wp-content/uploads/WP-manga/data/$pageSrc"
 				// WordPress legacy path: "wp-content/uploads/..."
 				pageSrc.startsWith("wp-content") -> "$cdnUrl/$pageSrc"
-				// MaidScan specific path: https://cdn.sussytoons.wtf/scans/3/obras/{obra_id}/capitulos/{cap_numero}/{src}
-				obraId > 0 && capNumero > 0 -> "https://cdn.sussytoons.wtf/scans/$scanId/obras/$obraId/capitulos/$capNumero/$pageSrc"
-				// Fallback to old CDN
+				obraId > 0 && capNumero > 0 -> "$cdnUrl/scans/$scanId/obras/$obraId/capitulos/$capNumero/$pageSrc"
 				else -> "$cdnUrl/$pageSrc"
 			}
 
@@ -308,9 +318,9 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			.build()
 
 		val response = webClient.httpGet(url, apiHeaders).parseJson()
-		val tagsArray = response.optJSONArray("resultados")
-
-		if (tagsArray == null) return emptySet()
+		// The payload keys this list "tags"; "resultados" never existed and left
+		// the tag filter permanently empty.
+		val tagsArray = response.optJSONArray("tags") ?: return emptySet()
 
 		return tagsArray.mapJSON { tagJson ->
 			val tagName = tagJson.optString("tag_nome").ifEmpty {
