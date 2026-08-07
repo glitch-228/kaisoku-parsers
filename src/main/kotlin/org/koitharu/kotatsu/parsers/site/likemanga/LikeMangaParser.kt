@@ -220,7 +220,7 @@ internal abstract class LikeMangaParser(
 						result
 					}
 				}
-			}.reversed(),
+			}.sortedBy { it.number }
 		)
 	}
 

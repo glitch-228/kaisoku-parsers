@@ -96,11 +96,11 @@ internal class ReYume(context: MangaLoaderContext) :
 			append("?alt=json&orderby=published&max-results=9999")
 		}
 
-		val json = webClient.httpGet(url).parseJson().getJSONObject("feed").getJSONArray("entry").asTypedList<JSONObject>().reversed()
+		val json = webClient.httpGet(url).parseJson().getJSONObject("feed").getJSONArray("entry").asTypedList<JSONObject>()
 		val dateFormat = SimpleDateFormat(datePattern, sourceLocale)
 		val mangaTitle = doc.selectFirst("h1[itemprop=name], h1.post-title, h1#post-title")?.text().orEmpty()
 
-		return json.mapIndexedNotNull { i, j ->
+		return json.mapNotNull { j ->
 			val name = j.getJSONObject("title").getString("\$t")
 			val prefixToStrip = if (mangaTitle.isNotEmpty() && name.contains(mangaTitle, ignoreCase = true)) {
 				mangaTitle
@@ -123,19 +123,19 @@ internal class ReYume(context: MangaLoaderContext) :
 			val dateText = j.getJSONObject("published").getString("\$t").substringBefore("T")
 			val slug = mangaUrl.substringAfterLast('/')
 			val slugChapter = href.substringAfterLast('/')
-			if (slug == slugChapter) return@mapIndexedNotNull null
+			if (slug == slugChapter) return@mapNotNull null
 			MangaChapter(
 				id = generateUid(href),
 				url = href,
 				title = chapterName,
-				number = i + 1f,
+				number = chapterName.extractChapterNumber(),
 				volume = 0,
 				branch = null,
 				uploadDate = dateFormat.parseSafe(dateText),
 				scanlator = null,
 				source = source,
 			)
-		}
+		}.sortedBy { it.number }
 	}
 
 	override suspend fun fetchAvailableTags(): Set<MangaTag> {

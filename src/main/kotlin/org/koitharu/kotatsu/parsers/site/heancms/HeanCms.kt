@@ -154,13 +154,14 @@ internal abstract class HeanCms(
 		val data = response.getJSONArray("data").asTypedList<JSONObject>()
 		val dateFormat = SimpleDateFormat(datePattern, Locale.ENGLISH)
 		return manga.copy(
-			chapters = data.mapChapters(reversed = true) { i, it ->
+			chapters = data.mapChapters { _, it ->
 				val chapterUrl =
 					"/series/${it.getJSONObject("series").getString("series_slug")}/${it.getString("chapter_slug")}"
+				val name = it.getString("chapter_name")
 				MangaChapter(
 					id = generateUid(it.getLong("id")),
-					title = it.getString("chapter_name"),
-					number = i + 1f,
+					title = name,
+					number = name.extractChapterNumber(),
 					volume = 0,
 					url = chapterUrl,
 					scanlator = null,
@@ -168,7 +169,7 @@ internal abstract class HeanCms(
 					branch = null,
 					source = source,
 				)
-			},
+			}.sortedBy { it.number },
 		)
 	}
 

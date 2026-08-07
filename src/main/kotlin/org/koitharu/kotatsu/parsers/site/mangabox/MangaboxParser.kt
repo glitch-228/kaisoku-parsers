@@ -273,15 +273,16 @@ internal abstract class MangaboxParser(
 
     protected open suspend fun getChapters(doc: Document): List<MangaChapter> {
         val dateFormat = SimpleDateFormat(datePattern, sourceLocale)
-        return doc.body().select(selectChapter).mapChapters(reversed = true) { i, li ->
+        return doc.body().select(selectChapter).mapChapters { _, li ->
             val a = li.selectFirstOrThrow("a")
             val href = a.attrAsRelativeUrl("href")
+            val name = a.text()
             val dateText = li.select(selectDate).last()?.text()
 
             MangaChapter(
                 id = generateUid(href),
-                title = a.text(),
-                number = i + 1f,
+                title = name,
+                number = name.extractChapterNumber(),
                 volume = 0,
                 url = href,
                 uploadDate = parseChapterDate(
@@ -292,7 +293,7 @@ internal abstract class MangaboxParser(
                 scanlator = null,
                 branch = null,
             )
-        }
+        }.sortedBy { it.number }
     }
 
     protected open val selectPage = "div#vungdoc img, div.container-chapter-reader img"

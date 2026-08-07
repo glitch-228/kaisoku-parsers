@@ -176,20 +176,21 @@ internal abstract class MangaReaderParser(
 	protected open val selectChapter = "#chapterlist > ul > li"
 	override suspend fun getDetails(manga: Manga): Manga {
 		val docs = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
-		val chapters = docs.select(selectChapter).mapChapters(reversed = true) { index, element ->
+		val chapters = docs.select(selectChapter).mapChapters { _, element ->
 			val url = element.selectFirst("a")?.attrAsRelativeUrlOrNull("href") ?: return@mapChapters null
+			val name = element.selectFirst(".chapternum")?.textOrNull() ?: ""
 			MangaChapter(
 				id = generateUid(url),
-				title = element.selectFirst(".chapternum")?.textOrNull(),
+				title = name,
 				url = url,
-				number = index + 1f,
+				number = name.extractChapterNumber(),
 				volume = 0,
 				scanlator = null,
 				uploadDate = parseChapterDate(element.selectFirst(".chapterdate")?.text()),
 				branch = null,
 				source = source,
 			)
-		}
+		}.sortedBy { it.number }
 		return parseInfo(docs, manga, chapters)
 	}
 

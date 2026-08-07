@@ -169,7 +169,7 @@ internal abstract class LilianaParser(
 				in abandoned -> MangaState.ABANDONED
 				else -> null
 			},
-			chapters = doc.selectOrThrow("ul > li.chapter").mapChapters(reversed = true) { i, element ->
+			chapters = doc.selectOrThrow("ul > li.chapter").mapChapters(reversed = false) { i, element ->
 				val href = element.selectFirstOrThrow("a").attrAsRelativeUrl("href")
 				MangaChapter(
 					id = generateUid(href),
@@ -183,7 +183,7 @@ internal abstract class LilianaParser(
 					branch = null,
 					source = source,
 				)
-			},
+			}.sortedBy { it.number },
 		)
 	}
 

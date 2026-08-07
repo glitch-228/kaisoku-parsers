@@ -87,12 +87,13 @@ internal abstract class GalleryParser(
 		val df = SimpleDateFormat("HH:mm dd-MM-yyyy")
 		val time = content.selectFirst("div.article-info > small")?.text()?.trim()
 		val chapters = content.selectFirst("nav.pagination")?.select("a.pagination-link")
-			?.mapChapters { index, element ->
+			?.mapChapters { _, element ->
 				val relUrl = element.attrAsRelativeUrl("href")
+				val chapterText = element.ownText()
 				MangaChapter(
 					id = generateUid(relUrl),
-					title = null,
-					number = index + 1f,
+					title = chapterText,
+					number = chapterText.extractChapterNumber(),
 					volume = 0,
 					url = relUrl,
 					scanlator = null,
@@ -100,7 +101,7 @@ internal abstract class GalleryParser(
 					branch = null,
 					source = source,
 				)
-			}.orEmpty()
+			}?.sortedBy { it.number }?.orEmpty()
 		return manga.copy(chapters = chapters, description = description)
 	}
 

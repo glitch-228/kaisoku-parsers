@@ -29,9 +29,8 @@ internal class KomikGes(context: MangaLoaderContext) :
 		}
 		val json =
 			webClient.httpGet(url).parseJson().getJSONObject("feed").getJSONArray("entry").asTypedList<JSONObject>()
-				.reversed()
 		val dateFormat = SimpleDateFormat(datePattern, sourceLocale)
-		return json.mapIndexedNotNull { i, j ->
+		return json.mapNotNull { j ->
 			val name = j.getJSONObject("title").getString("\$t")
 			val href =
 				j.getJSONArray("link").asTypedList<JSONObject>().first { it.getString("rel") == "alternate" }
@@ -40,20 +39,20 @@ internal class KomikGes(context: MangaLoaderContext) :
 			val slug = mangaUrl.substringAfterLast('/')
 			val slugChapter = href.substringAfterLast('/')
 			if (slug == slugChapter) {
-				return@mapIndexedNotNull null
+				return@mapNotNull null
 			}
 			MangaChapter(
 				id = generateUid(href),
 				url = href,
 				title = name,
-				number = i + 1f,
+				number = name.extractChapterNumber(),
 				volume = 0,
 				branch = null,
 				uploadDate = dateFormat.parseSafe(dateText),
 				scanlator = null,
 				source = source,
 			)
-		}
+		}.sortedBy { it.number }
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {

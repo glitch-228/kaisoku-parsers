@@ -6,6 +6,19 @@ import org.koitharu.kotatsu.parsers.InternalParsersApi
 import org.koitharu.kotatsu.parsers.model.MangaChapter
 import org.koitharu.kotatsu.parsers.util.json.asTypedList
 
+private val CHAPTER_NUMBER_REGEX = Regex(
+	"""\b(?:chapter|ch\.?|chapitre|cap[ií]tulo|cap\.?|episode|ep\.?)\s*(\d+(?:[.,]\d+)?)""",
+	RegexOption.IGNORE_CASE,
+)
+private val FALLBACK_NUMBER_REGEX = Regex("""(\d+(?:[.,]\d+)?)""")
+
+/** Extracts the labeled chapter number, or the first number when the label is absent. */
+public fun String.extractChapterNumber(): Float {
+	val value = CHAPTER_NUMBER_REGEX.find(this)?.groupValues?.get(1)
+		?: FALLBACK_NUMBER_REGEX.find(this)?.value
+	return value?.replace(',', '.')?.toFloatOrNull() ?: 0f
+}
+
 @InternalParsersApi
 public inline fun <T> List<T>.mapChapters(
 	reversed: Boolean = false,

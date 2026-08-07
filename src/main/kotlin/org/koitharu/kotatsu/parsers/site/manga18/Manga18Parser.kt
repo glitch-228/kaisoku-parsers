@@ -181,22 +181,23 @@ internal abstract class Manga18Parser(
 
 	protected open suspend fun getChapters(doc: Document): List<MangaChapter> {
 		val dateFormat = SimpleDateFormat(datePattern, sourceLocale)
-		return doc.body().select(selectChapter).mapChapters(reversed = true) { i, li ->
-			val a = li.selectFirstOrThrow("a")
-			val href = a.attrAsRelativeUrl("href")
-			val dateText = li.selectFirst(selectDate)?.text()
-			MangaChapter(
-				id = generateUid(href),
-				title = a.textOrNull(),
-				number = i + 1f,
-				volume = 0,
-				url = href,
-				uploadDate = dateFormat.parseSafe(dateText),
-				source = source,
-				scanlator = null,
-				branch = null,
-			)
-		}
+        return doc.body().select(selectChapter).mapChapters { _, li ->
+            val a = li.selectFirstOrThrow("a")
+            val href = a.attrAsRelativeUrl("href")
+            val name = a.textOrNull() ?: ""
+            val dateText = li.selectFirst(selectDate)?.text()
+            MangaChapter(
+                id = generateUid(href),
+                title = name,
+                number = name.extractChapterNumber(),
+                volume = 0,
+                url = href,
+                uploadDate = dateFormat.parseSafe(dateText),
+                source = source,
+                scanlator = null,
+                branch = null,
+            )
+        }.sortedBy { it.number }
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
