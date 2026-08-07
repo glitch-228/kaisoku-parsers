@@ -2,7 +2,7 @@ package org.koitharu.kotatsu.parsers.site.vi
 
 import okhttp3.Headers
 import org.jsoup.nodes.Document
-import org.koitharu.kotatsu.parsers.Broken
+import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -15,12 +15,11 @@ import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken("Need to fix getPages")
 @MangaSourceParser("DAMCONUONG", "Dâm Cô Nương", "vi", type = ContentType.HENTAI)
 internal class DamCoNuong(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.DAMCONUONG, 30) {
 
-	override val configKeyDomain = ConfigKey.Domain("damconuong.co")
+	override val configKeyDomain = ConfigKey.Domain("damconuong.sbs", "damconuong.store")
 
 	private val availableTags = suspendLazy(initializer = ::fetchTags)
 
@@ -108,10 +107,8 @@ internal class DamCoNuong(context: MangaLoaderContext) :
 	}
 
 	private fun parseMangaList(doc: Document): List<Manga> {
-		return doc.select(
-			"div.border.rounded-xl.border-gray-300.dark\\:border-dark-blue.bg-white.dark\\:bg-fire-blue"
-		).map { element ->
-			val mainA = element.selectFirstOrThrow("div.relative a")
+		return doc.select("div.manga-vertical").map { element ->
+			val mainA = element.selectFirstOrThrow("a[href*=/truyen/]")
 			val href = mainA.attrAsRelativeUrl("href")
 			val title = mainA.selectFirst("div.cover-frame img")?.attr("alt")
 				?.takeIf { it.isNotBlank() }
@@ -185,39 +182,31 @@ internal class DamCoNuong(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-    val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
+		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
+		return doc.select("div#chapter-content img").map { img ->
+			val url = resolveImageUrl(img, chapter)
+			MangaPage(
+				id = generateUid(url),
+				url = url,
+				preview = null,
+				source = source,
+			)
+		}
+	}
 
-    doc.selectFirst("script:containsData(window.encryptionConfig)")?.data()?.let { scriptContent ->
-        val fallbackUrlsRegex = Regex(""""fallbackUrls"\s*:\s*(\[.*?])""")
-        val arrayString = fallbackUrlsRegex.find(scriptContent)?.groupValues?.get(1) ?: return@let
-        val urlRegex = Regex("""(https?:\\?/\\?[^"]+\.(?:jpg|jpeg|png|webp|gif))""")
-        val scriptImages = urlRegex.findAll(arrayString).map {
-            it.groupValues[1].replace("\\/", "/")
-        }.toList()
+	private fun resolveImageUrl(img: Element, chapter: MangaChapter): String {
+		val src = img.requireSrc()
+		if (isValidImage(src)) return src
 
-        if (scriptImages.isNotEmpty()) {
-            return scriptImages.map { url ->
-                MangaPage(id = generateUid(url), url = url, preview = null, source = source)
-            }
-        }
-    }
+		// throw e if null
+		throw ParseException("Image src not found (or only .gif found)!", chapter.url)
+	}
 
-    val tagImagePages = doc.select("div#chapter-content img").mapNotNull { img ->
-        val imageUrl = (img.attr("abs:src").takeIf { it.isNotBlank() }
-            ?: img.attr("abs:data-src").takeIf { it.isNotBlank() })
-            ?.trim()
-
-        imageUrl?.let {
-            MangaPage(id = generateUid(it), url = it, preview = null, source = source)
-        }
-    }
-
-    if (tagImagePages.isNotEmpty()) {
-        return tagImagePages
-    }
-
-    throw ParseException("Không tìm thấy bất kỳ nguồn ảnh nào (đã thử cả script và thẻ img).", chapter.url)
-}
+	private fun isValidImage(url: String): Boolean {
+		return url.isNotBlank()
+			&& !url.endsWith(".gif", ignoreCase = true)
+			&& url.startsWith("https")
+	}
 
 	private fun parseChapterDate(date: String?): Long {
 		if (date == null) return 0
