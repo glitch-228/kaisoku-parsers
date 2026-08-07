@@ -1,5 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.natsu
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -228,75 +230,94 @@ internal abstract class NatsuParser(
         return mangaList
     }
 
+    private val detailsCacheLock = Any()
+
+    private val detailsCache = object : LinkedHashMap<String, Manga>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Manga>?): Boolean = size > 10
+    }
+
     override suspend fun getDetails(manga: Manga): Manga {
-        val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
+        synchronized(detailsCacheLock) {
+            detailsCache[manga.url]?.let { return it }
+        }
 
-        // Manga ID for chapter loading
-        val mangaId = doc.selectFirst("[hx-get*='manga_id=']")
-            ?.attr("hx-get")
-            ?.substringAfter("manga_id=")
-            ?.substringBefore("&")
-            ?.trim()
-            ?: doc.selectFirst("input#manga_id, [data-manga-id]")
-                ?.let { it.attr("value").ifEmpty { it.attr("data-manga-id") } }
-            ?: manga.url.substringAfterLast("/manga/").substringBefore("/")
+        val result = coroutineScope {
+            val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
 
-        val titleElement = doc.selectFirst("h1[itemprop=name]")
-        val title = titleElement?.text() ?: manga.title
+            // Manga ID for chapter loading
+            val mangaId = doc.selectFirst("[hx-get*='manga_id=']")
+                ?.attr("hx-get")
+                ?.substringAfter("manga_id=")
+                ?.substringBefore("&")
+                ?.trim()
+                ?: doc.selectFirst("input#manga_id, [data-manga-id]")
+                    ?.let { it.attr("value").ifEmpty { it.attr("data-manga-id") } }
+                ?: manga.url.substringAfterLast("/manga/").substringBefore("/")
 
-        val altTitles = titleElement?.nextElementSibling()?.text()
-            ?.split(',')
-            ?.mapNotNull { it.trim().takeIf(String::isNotBlank) }
-            ?.toSet()
-            ?: emptySet()
+            val chaptersDeferred = async { loadChapters(mangaId, manga.url.toAbsoluteUrl(domain)) }
 
-        val description = doc.select("div[itemprop=description]")
-            .joinToString("\n\n") { it.text() }
-            .trim()
-            .takeIf { it.isNotBlank() }
+            val titleElement = doc.selectFirst("h1[itemprop=name]")
+            val title = titleElement?.text() ?: manga.title
 
-        val coverUrl = doc.selectFirst("div[itemprop=image] > img")?.src()
-            ?: manga.coverUrl
+            val altTitles = titleElement?.nextElementSibling()?.text()
+                ?.split(',')
+                ?.mapNotNull { it.trim().takeIf(String::isNotBlank) }
+                ?.toSet()
+                ?: emptySet()
 
-        val tags = doc.select("a[itemprop=genre]").mapNotNullToSet { a ->
-            MangaTag(
-                key = a.attr("href").substringAfterLast("/genre/").removeSuffix("/"),
-                title = a.text().toTitleCase(),
-                source = source,
+            val description = doc.select("div[itemprop=description]")
+                .joinToString("\n\n") { it.text() }
+                .trim()
+                .takeIf { it.isNotBlank() }
+
+            val coverUrl = doc.selectFirst("div[itemprop=image] > img")?.src()
+                ?: manga.coverUrl
+
+            val tags = doc.select("a[itemprop=genre]").mapNotNullToSet { a ->
+                MangaTag(
+                    key = a.attr("href").substringAfterLast("/genre/").removeSuffix("/"),
+                    title = a.text().toTitleCase(),
+                    source = source,
+                )
+            }
+
+            fun findInfoText(key: String): String? {
+                return doc.select("div.space-y-2 > .flex:has(h4)")
+                    .find { it.selectFirst("h4")?.text()?.contains(key, ignoreCase = true) == true }
+                    ?.selectFirst("p.font-normal")?.text()
+            }
+
+            val stateText = findInfoText("Status")?.lowercase()
+            val state = when {
+                stateText?.contains("ongoing") == true -> MangaState.ONGOING
+                stateText?.contains("completed") == true -> MangaState.FINISHED
+                stateText?.contains("hiatus") == true -> MangaState.PAUSED
+                else -> manga.state
+            }
+
+            val authors = findInfoText("Author")
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.toSet() ?: emptySet()
+
+            val chapters = chaptersDeferred.await()
+
+            manga.copy(
+                title = title,
+                altTitles = altTitles,
+                description = description,
+                coverUrl = coverUrl,
+                tags = tags,
+                state = state,
+                authors = authors,
+                chapters = chapters,
             )
         }
 
-        fun findInfoText(key: String): String? {
-            return doc.select("div.space-y-2 > .flex:has(h4)")
-                .find { it.selectFirst("h4")?.text()?.contains(key, ignoreCase = true) == true }
-                ?.selectFirst("p.font-normal")?.text()
+        synchronized(detailsCacheLock) {
+            detailsCache[manga.url] = result
         }
-
-        val stateText = findInfoText("Status")?.lowercase()
-        val state = when {
-            stateText?.contains("ongoing") == true -> MangaState.ONGOING
-            stateText?.contains("completed") == true -> MangaState.FINISHED
-            stateText?.contains("hiatus") == true -> MangaState.PAUSED
-            else -> manga.state
-        }
-
-        val authors = findInfoText("Author")
-            ?.split(",")
-            ?.map { it.trim() }
-            ?.toSet() ?: emptySet()
-
-        val chapters = loadChapters(mangaId, manga.url.toAbsoluteUrl(domain))
-
-        return manga.copy(
-            title = title,
-            altTitles = altTitles,
-            description = description,
-            coverUrl = coverUrl,
-            tags = tags,
-            state = state,
-            authors = authors,
-            chapters = chapters,
-        )
+        return result
     }
 
     protected open val hxTrigger = "chapter-list"
@@ -348,7 +369,7 @@ internal abstract class NatsuParser(
             page++
             if (page > 100) break
         }
-        return chapters.reversed()
+        return chapters.sortedBy { it.number }
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {

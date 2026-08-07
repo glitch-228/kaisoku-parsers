@@ -251,9 +251,19 @@ internal class Atsumaru(context: MangaLoaderContext) :
         }
     }
 
+    private val detailsCacheLock = Any()
+
+    private val detailsCache = object : LinkedHashMap<String, Manga>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Manga>?): Boolean {
+            return size > 5
+        }
+    }
+
     // limit tags to 20
     override suspend fun getDetails(manga: Manga): Manga {
-        detailsCache[manga.url]?.let { return it }
+        synchronized(detailsCacheLock) {
+            detailsCache[manga.url]?.let { return it }
+        }
 
         val result = coroutineScope {
             val mangaId = manga.url.substringAfterLast("/")
@@ -342,7 +352,7 @@ internal class Atsumaru(context: MangaLoaderContext) :
                     scanlator = scanName,
                     branch = scanName,
                 )
-            }.reversed()
+            }.sortedBy { it.number }
 
             val groupedChapters = if (chapters.map { it.branch }.distinct().size > 1) {
                 chapters.map { it.copy(branch = it.branch ?: "Unknown") }
@@ -367,15 +377,10 @@ internal class Atsumaru(context: MangaLoaderContext) :
             )
         }
 
-        detailsCache.put(manga.url, result)
-        return result
-    }
-
-    @get:Synchronized
-    private val detailsCache = object : LinkedHashMap<String, Manga>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Manga>?): Boolean {
-            return size > 5
+        synchronized(detailsCacheLock) {
+            detailsCache[manga.url] = result
         }
+        return result
     }
 
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {
