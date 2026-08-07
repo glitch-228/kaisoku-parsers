@@ -51,6 +51,6 @@ internal class Kiryuu(context: MangaLoaderContext) :
                 branch = null,
                 source = source,
             )
-        }.reversed()
+        }.sortedBy { it.number }
     }
 }
