@@ -1,47 +1,34 @@
 package org.koitharu.kotatsu.parsers.site.heancms.en
 
-import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.heancms.HeanCms
-import org.koitharu.kotatsu.parsers.util.generateUid
-import org.koitharu.kotatsu.parsers.util.json.asTypedList
-import org.koitharu.kotatsu.parsers.util.mapChapters
-import org.koitharu.kotatsu.parsers.util.parseJson
-import org.koitharu.kotatsu.parsers.util.parseSafe
-import java.text.SimpleDateFormat
-import java.util.*
+import org.koitharu.kotatsu.parsers.util.*
 
 @MangaSourceParser("LUACOMIC_COM", "Lua Scans", "en")
 internal class LuaScans(context: MangaLoaderContext) :
-    HeanCms(context, MangaParserSource.LUACOMIC_COM, "luacomic.com") {
+	HeanCms(context, MangaParserSource.LUACOMIC_COM, "luacomic.org") {
 
-    override val datePattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+	// The reader is a Next.js client-rendered page: page image URLs are embedded (with escaped
+	// slashes) in the server-sent flight data under /uploads/series/..., already in page order.
+	private val pageUrlRegex =
+		Regex("""https://[^"'\\ ]*?/uploads/series/[^"'\\ ]+?\.(?:webp|jpg|jpeg|png|avif)(?:\.(?:webp|jpg|jpeg|png|avif))?""")
 
-    override suspend fun getDetails(manga: Manga): Manga {
-        val seriesId = manga.url.toLongOrNull() ?: manga.id
-        val url = reqUrl(seriesId)
-        val response = webClient.httpGet(url).parseJson()
-        val data = response.getJSONArray("data").asTypedList<JSONObject>()
-        val dateFormat = SimpleDateFormat(datePattern, Locale.ENGLISH).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-        return manga.copy(
-            chapters = data.mapChapters(reversed = true) { i, it ->
-                val chapterUrl = "/series/${it.getJSONObject("series").getString("series_slug")}/${it.getString("chapter_slug")}"
-                MangaChapter(
-                    id = generateUid(it.getLong("id")),
-                    title = it.getString("chapter_name"),
-                    number = i + 1f,
-                    volume = 0,
-                    url = chapterUrl,
-                    scanlator = null,
-                    uploadDate = dateFormat.parseSafe(it.getString("created_at")),
-                    branch = null,
-                    source = source,
-                )
-            },
-        )
-    }
+	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
+		val fullUrl = chapter.url.toAbsoluteUrl(domain)
+		val html = webClient.httpGet(fullUrl).parseRaw().replace("\\/", "/")
+		return pageUrlRegex.findAll(html)
+			.map { it.value }
+			.distinct()
+			.map { url ->
+				MangaPage(
+					id = generateUid(url),
+					url = url,
+					preview = null,
+					source = source,
+				)
+			}
+			.toList()
+	}
 }
