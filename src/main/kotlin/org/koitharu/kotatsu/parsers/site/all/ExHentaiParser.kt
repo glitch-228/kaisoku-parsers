@@ -122,9 +122,15 @@ internal class ExHentaiParser(
             return emptyList()
         }
 
+        val isAuthorizedDomain = domain == DOMAIN_AUTHORIZED
         val url = urlBuilder()
-        url.addEncodedQueryParameter("next", next.toString())
-        url.addQueryParameter("f_search", filter.toSearchQuery())
+        if (page > 0 || !isAuthorizedDomain) {
+            url.addEncodedQueryParameter("next", next.toString())
+        }
+        val searchQuery = filter.toSearchQuery()
+        if (searchQuery != null || !isAuthorizedDomain) {
+            url.addQueryParameter("f_search", searchQuery)
+        }
 
         val fCats = filter.types.toFCats()
         if (fCats != 0) {
@@ -134,8 +140,11 @@ internal class ExHentaiParser(
             // by unknown reason cookie "sl=dm_2" is ignored, so, we should request it again
             url.addQueryParameter("inline_set", "dm_e")
         }
-        url.addQueryParameter("advsearch", "1")
-        if (config[suspiciousContentKey]) {
+        val showSuspiciousContent = config[suspiciousContentKey]
+        if (!isAuthorizedDomain || showSuspiciousContent) {
+            url.addQueryParameter("advsearch", "1")
+        }
+        if (showSuspiciousContent) {
             url.addQueryParameter("f_sh", "on")
         }
         val body = webClient.httpGet(url.build()).parseHtml().body()
@@ -170,7 +179,7 @@ internal class ExHentaiParser(
                 ?.nextElementSibling()?.textOrNull()
             Manga(
                 id = generateUid(href),
-                title = rawTitle.cleanupTitle(),
+                title = rawTitle.toMangaTitle(),
                 altTitles = emptySet(),
                 url = href,
                 publicUrl = a.absUrl("href"),
@@ -210,8 +219,8 @@ internal class ExHentaiParser(
         val tags = tagList?.parseTags().orEmpty()
 
         return manga.copy(
-            title = title?.getElementById("gn")?.text()?.cleanupTitle() ?: manga.title,
-            altTitles = setOfNotNull(title?.getElementById("gj")?.text()?.cleanupTitle()?.nullIfEmpty()),
+            title = title?.getElementById("gn")?.text()?.toMangaTitle() ?: manga.title,
+            altTitles = setOfNotNull(title?.getElementById("gj")?.text()?.toMangaTitle()?.nullIfEmpty()),
             publicUrl = doc.baseUri().ifEmpty { manga.publicUrl },
             rating = root.getElementById("rating_label")?.text()
                 ?.substringAfterLast(' ')
@@ -389,6 +398,10 @@ internal class ExHentaiParser(
     private fun String.cleanupTitle(): String {
         return replace(titleCleanupPattern, "")
             .replace(spacesCleanupPattern, "")
+    }
+
+    private fun String.toMangaTitle(): String {
+        return if (domain == DOMAIN_AUTHORIZED) trim() else cleanupTitle()
     }
 
     private fun Element.parseTags(): Set<MangaTag> {
