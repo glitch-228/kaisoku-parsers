@@ -1,4 +1,4 @@
-package org.koitharu.kotatsu.parsers.site.all
+package org.koitharu.kotatsu.parsers.site.en
 
 import okhttp3.Interceptor
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -219,7 +219,21 @@ internal class Kagane(context: MangaLoaderContext) :
         val responseBody = try {
             webClient.httpPost(url.toHttpUrl(), jsonBody, headers).parseRaw()
         } catch (e: HttpStatusException) {
-            if (e.statusCode == 403) {
+            // Always surface 403 via the Cloudflare verification path — the interceptor below
+            // identifies block pages *and* challenge pages, not just "Just a moment…" challenges.
+            if (e.statusCode == 403 || e.statusCode == 429 || e.statusCode == 503) {
+                requestCloudflareVerification(url, e)
+            } else {
+                throw e
+            }
+        } catch (e: ParseException) {
+            // Proxy/network-level errors carrying the same markers should also relaunch the
+            // verification rather than presenting as a bare parse failure.
+            val causeMessage = e.message.orEmpty() + " " + (e.cause?.message.orEmpty())
+            if (causeMessage.contains("CloudFlare", ignoreCase = true) ||
+                causeMessage.contains("cf-mitigated", ignoreCase = true) ||
+                causeMessage.contains("cf-error-details", ignoreCase = true)
+            ) {
                 requestCloudflareVerification(url, e)
             } else {
                 throw e
@@ -540,10 +554,17 @@ internal class Kagane(context: MangaLoaderContext) :
     }
 
     private fun String.isCloudflareChallenge(): Boolean {
-        return contains("cf-mitigated", ignoreCase = true) ||
-            contains("Just a moment", ignoreCase = true) ||
-            contains("challenges.cloudflare.com", ignoreCase = true) ||
-            contains("/cdn-cgi/challenge-platform/", ignoreCase = true)
+        // Match any of the CF block/challenge markers *after* the page has finished loading —
+        // including the block-page banner, the challenge-platform script path, and the new
+        // "cf-chl-bypass"-style resumption marker DOMs that a stale clearance cookie can land on.
+        return contains("cf-mitigated", ignoreCase = true)
+            || contains("Just a moment", ignoreCase = true)
+            || contains("challenges.cloudflare.com", ignoreCase = true)
+            || contains("/cdn-cgi/challenge-platform/", ignoreCase = true)
+            // CF block-page (Ray ID + "Sorry, you have been blocked") — handled via verification path.
+            || contains("Sorry, you have been blocked", ignoreCase = true)
+            || contains("cf-error-details", ignoreCase = true)
+            || contains("cf-chl-bypass", ignoreCase = true)
     }
 
     private data class ManifestPage(
