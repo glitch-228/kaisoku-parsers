@@ -29,7 +29,7 @@ private const val DOMAIN_AUTHORIZED = "exhentai.org"
 private val TAG_PREFIXES = arrayOf("male:", "female:", "other:")
 private const val BANNED_RESPONSE_LENGTH = 256L
 
-@MangaSourceParser("EXHENTAI", "ExHentai", type = ContentType.HENTAI)
+@MangaSourceParser("EXHENTAI", "ExHentai", "", ContentType.HENTAI)
 internal class ExHentaiParser(
     context: MangaLoaderContext,
 ) : PagedMangaParser(context, MangaParserSource.EXHENTAI, pageSize = 25), MangaParserAuthProvider, Interceptor {
@@ -148,10 +148,11 @@ internal class ExHentaiParser(
             url.addQueryParameter("f_sh", "on")
         }
         val body = webClient.httpGet(url.build()).parseHtml().body()
-        val root = body.selectFirst("table.itg")?.selectFirst("tbody")
-        if (root == null) {
+        val rowRoot = body.selectFirst("table.itg")?.selectFirst("tbody")
+        val gridRoot = rowRoot ?: body.selectFirst("div.itg.gld")?.takeIf { it.children().isNotEmpty() }
+        if (rowRoot == null && gridRoot == null) {
             if (updateDm) {
-                if (body.getElementsContainingText("No hits found").isNotEmpty()) {
+                if (isNoHitsPage(body)) {
                     return emptyList()
                 } else {
                     body.parseFailed("Cannot find root")
@@ -167,34 +168,79 @@ internal class ExHentaiParser(
             }.put(page + 1, nextTimestamp)
         }
 
-        return root.children().mapNotNull { tr ->
-            if (tr.childrenSize() != 2) return@mapNotNull null
-            val (td1, td2) = tr.children()
-            val gLink = td2.selectFirstOrThrow("div.glink")
-            val a = gLink.parents().select("a").first() ?: gLink.parseFailed("link not found")
-            val href = a.attrAsRelativeUrl("href")
-            val tagsDiv = gLink.nextElementSibling() ?: gLink.parseFailed("tags div not found")
-            val rawTitle = gLink.text()
-            val author = tagsDiv.getElementsContainingOwnText("artist:").first()
-                ?.nextElementSibling()?.textOrNull()
-            Manga(
-                id = generateUid(href),
-                title = rawTitle.toMangaTitle(),
-                altTitles = emptySet(),
-                url = href,
-                publicUrl = a.absUrl("href"),
-                rating = td2.selectFirst("div.ir")?.parseRating() ?: RATING_UNKNOWN,
-                contentRating = ContentRating.ADULT,
-                coverUrl = td1.selectFirst("img")?.attrAsAbsoluteUrlOrNull("src"),
-                tags = tagsDiv.parseTags(),
-                state = when {
-                    rawTitle.contains("(ongoing)", ignoreCase = true) -> MangaState.ONGOING
-                    else -> null
-                },
-                authors = setOfNotNull(author),
-                source = source,
-            )
+        return if (gridRoot != null) {
+            gridRoot.children().mapNotNull { it.toGridManga(source) }
+        } else {
+            rowRoot!!.children().mapNotNull { tr ->
+                if (tr.childrenSize() != 2) return@mapNotNull null
+                val (td1, td2) = tr.children()
+                val gLink = td2.selectFirstOrThrow("div.glink")
+                val a = gLink.parents().select("a").first() ?: gLink.parseFailed("link not found")
+                val href = a.attrAsRelativeUrl("href")
+                val tagsDiv = gLink.nextElementSibling() ?: gLink.parseFailed("tags div not found")
+                val rawTitle = gLink.text()
+                val author = tagsDiv.getElementsContainingOwnText("artist:").first()
+                    ?.nextElementSibling()?.textOrNull()
+                Manga(
+                    id = generateUid(href),
+                    title = rawTitle.toMangaTitle(),
+                    altTitles = emptySet(),
+                    url = href,
+                    publicUrl = a.absUrl("href"),
+                    rating = td2.selectFirst("div.ir")?.parseRating() ?: RATING_UNKNOWN,
+                    contentRating = ContentRating.ADULT,
+                    coverUrl = td1.selectFirst("img")?.attrAsAbsoluteUrlOrNull("src"),
+                    tags = tagsDiv.parseTags(),
+                    state = when {
+                        rawTitle.contains("(ongoing)", ignoreCase = true) -> MangaState.ONGOING
+                        else -> null
+                    },
+                    authors = setOfNotNull(author),
+                    source = source,
+                )
+            }
         }
+    }
+
+    private fun Element.toGridManga(source: MangaParserSource): Manga? {
+        // Grid tile layout (Table -> Tiled view setting on ExHentai/E-Hentai account preferences).
+        // Shape: div.gl1t > a[href^=/g/] > div.gl4t.glname.glink(title), then a second a
+        // around div.gl3t > img(cover), then div.gl5t > [ header row (cs ct1 + posted_X) | meta row ].
+        val gl4t = selectFirst("div.gl4t.glname.glink") ?: return null
+        val coverImg = selectFirst("div.gl3t img") ?: return null
+        val anchor = parents().firstOrNull { it.tagName() == "a" }
+            ?: selectFirst("a[href^=/g/]")
+            ?: return null
+        // In the live layout this is the absolute gallery URL; in saved snapshots it may be relative.
+        val href = anchor.attrAsRelativeUrl("href")
+        val rawTitle = gl4t.text()
+        val rating = selectFirst("div.ir")?.parseRating() ?: RATING_UNKNOWN
+        return Manga(
+            id = generateUid(href),
+            title = rawTitle.toMangaTitle(),
+            altTitles = emptySet(),
+            url = href,
+            publicUrl = anchor.absUrl("href").ifBlank {
+                // Snapshot-relative — resolve against the host.
+                if (href.startsWith("/")) "https://$domain$href" else "https://$domain/$href"
+            },
+            rating = rating,
+            contentRating = ContentRating.ADULT,
+            coverUrl = coverImg.attrAsAbsoluteUrlOrNull("src"),
+            tags = emptySet(),
+            state = when {
+                rawTitle.contains("(ongoing)", ignoreCase = true) -> MangaState.ONGOING
+                else -> null
+            },
+            authors = emptySet(),
+            source = source,
+        )
+    }
+
+    private fun isNoHitsPage(body: Element): Boolean {
+        return body.getElementsContainingText("No hits found").isNotEmpty() ||
+            body.getElementsContainingText("No results found").isNotEmpty() ||
+            body.getElementsContainingText("No galleries found").isNotEmpty()
     }
 
     override suspend fun getDetails(manga: Manga): Manga {
