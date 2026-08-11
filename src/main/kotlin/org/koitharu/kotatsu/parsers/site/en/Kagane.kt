@@ -32,8 +32,8 @@ import javax.crypto.spec.SecretKeySpec
 internal class Kagane(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.KAGANE, pageSize = 35) {
 
-    override val configKeyDomain = ConfigKey.Domain("kagane.org")
-    private val apiUrl = "https://yuzuki.kagane.org"
+    override val configKeyDomain = ConfigKey.Domain("kagane.to")
+    private val apiUrl = "https://kagane.to"
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
@@ -599,7 +599,7 @@ internal class Kagane(context: MangaLoaderContext) :
         }
     }
 
-    private var cacheUrl = "https://akari.$domain"
+    private var cacheUrl = "https://kstatic.to"
     private var accessToken: String = ""
     private var cachedCert: String? = null
     private var certificateFetchAttempted = false
