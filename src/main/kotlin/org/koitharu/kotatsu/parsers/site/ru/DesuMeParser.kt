@@ -5,6 +5,7 @@ import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -119,16 +120,18 @@ internal class DesuMeParser(context: MangaLoaderContext) :
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val fullUrl = chapter.url.toAbsoluteUrl(domain)
         val script = webClient.httpGet(fullUrl).parseHtml().select("script").firstNotNullOfOrNull { element ->
-            element.data().takeIf { "Reader.init" in it }
+            element.data().takeIf { "window.MangaReader" in it }
         } ?: throw ParseException("Reader configuration not found", fullUrl)
-        val directory = script.findGroupValue(READER_DIRECTORY_REGEX)?.toAbsoluteUrl(domain)
-            ?: throw ParseException("Reader image directory not found", fullUrl)
-        val images = JSONArray(
-            script.findGroupValue(READER_IMAGES_REGEX)
-                ?: throw ParseException("Reader images not found", fullUrl),
-        )
-        return List(images.length()) { index ->
-            val url = concatUrl(directory, images.getJSONArray(index).getString(0))
+        val config = script.extractMangaReaderConfig()
+            ?: throw ParseException("Invalid reader configuration", fullUrl)
+        val apiBaseUrl = config.getString("apiBaseUrl")
+        val chapterId = config.getJSONObject("chapter").getLong("id")
+        val payloadUrl = concatUrl("https://$domain", "$apiBaseUrl/chapters/$chapterId")
+        val payload = webClient.httpGet(payloadUrl).parseJson()
+            .getJSONObject("chapter")
+            .getJSONArray("pages")
+        return List(payload.length()) { index ->
+            val url = payload.getJSONObject(index).getString("url")
             MangaPage(
                 id = generateUid(url),
                 preview = null,
@@ -222,6 +225,42 @@ internal class DesuMeParser(context: MangaLoaderContext) :
             else -> "updated"
         }
 
+    private fun String.extractMangaReaderConfig(): JSONObject? {
+        val marker = "window.MangaReader"
+        val markerIndex = indexOf(marker)
+        if (markerIndex < 0) return null
+        val braceStart = indexOf('{', markerIndex)
+        if (braceStart < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in braceStart until length) {
+            val ch = this[i]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (ch == '\\') {
+                    escaped = true
+                } else if (ch == '"') {
+                    inString = false
+                }
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) {
+                        return runCatching { JSONObject(substring(braceStart, i + 1)) }
+                            .getOrNull()
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     private suspend fun fetchTags(): Map<String, MangaTag> {
         val doc = webClient.httpGet("https://$domain/manga/").parseHtml()
         val root = doc.body().requireElementById("animeFilter")
@@ -253,10 +292,5 @@ internal class DesuMeParser(context: MangaLoaderContext) :
         val LEGACY_MANGA_URL_REGEX = Regex("""/manga/api/(\d+)/?$""")
         val VOLUME_REGEX = Regex("""/vol(\d+)/""")
         val CHAPTER_REGEX = Regex("""/ch([\d.,]+)/""")
-        val READER_DIRECTORY_REGEX = Regex("""dir:\s*["']([^"']+)["']""")
-        val READER_IMAGES_REGEX = Regex(
-            """images:\s*(\[\[.*?]])\s*,\s*page:""",
-            RegexOption.DOT_MATCHES_ALL,
-        )
     }
 }
