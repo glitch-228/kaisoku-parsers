@@ -122,13 +122,17 @@ internal class ExHentaiParser(
             return emptyList()
         }
 
+        // `domain` re-runs checkAuth() on every access, so capture the auth state once here and
+        // reuse it below instead of re-reading it per query parameter.
         val isAuthorizedDomain = domain == DOMAIN_AUTHORIZED
         val url = urlBuilder()
         if (page > 0 || !isAuthorizedDomain) {
             url.addEncodedQueryParameter("next", next.toString())
         }
         val searchQuery = filter.toSearchQuery()
-        if (searchQuery != null || !isAuthorizedDomain) {
+        // Never send an empty f_search: it turns the front page into an empty advanced search,
+        // which returns a completely different set of galleries.
+        if (searchQuery != null) {
             url.addQueryParameter("f_search", searchQuery)
         }
 

@@ -32,6 +32,9 @@ internal class ExHentaiParserTest {
 
 		assertEquals(emptyList<Any>(), parser.getList(0, SortOrder.NEWEST, MangaListFilter.EMPTY))
 
+		// The mock returns NO_RESULTS_HTML (no gallery table), so the parser retries once with
+		// inline_set=dm_e. Neither request may carry f_search or advsearch: an empty search turns
+		// the front page into an empty advanced search returning a completely different set.
 		assertEquals(
 			listOf(
 				"https://exhentai.org/",
@@ -39,6 +42,10 @@ internal class ExHentaiParserTest {
 			),
 			context.requestedUrls.map(HttpUrl::toString),
 		)
+		context.requestedUrls.forEach { url ->
+			assertNull(url.queryParameter("f_search"))
+			assertNull(url.queryParameter("advsearch"))
+		}
 	}
 
 	@Test
@@ -73,6 +80,22 @@ internal class ExHentaiParserTest {
 			assertEquals("e-hentai.org", url.host)
 			assertEquals("0", url.queryParameter("next"))
 			assertEquals("tag:\"yaoi\"$", url.queryParameter("f_search"))
+			assertEquals("1", url.queryParameter("advsearch"))
+		}
+	}
+
+	@Test
+	fun `e-hentai unfiltered page keeps advsearch but never sends empty f_search`() = runTest {
+		val context = ExHentaiContext(authorized = false)
+		val parser = ExHentaiParser(context)
+
+		assertEquals(emptyList<Any>(), parser.getList(0, SortOrder.NEWEST, MangaListFilter.EMPTY))
+
+		assertEquals(2, context.requestedUrls.size)
+		context.requestedUrls.forEach { url ->
+			assertEquals("e-hentai.org", url.host)
+			assertEquals("0", url.queryParameter("next"))
+			assertNull(url.queryParameter("f_search"))
 			assertEquals("1", url.queryParameter("advsearch"))
 		}
 	}
