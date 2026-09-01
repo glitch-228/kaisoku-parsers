@@ -4,6 +4,7 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.Manga
 import org.koitharu.kotatsu.parsers.model.MangaChapter
 import org.koitharu.kotatsu.parsers.model.MangaListFilter
@@ -15,6 +16,7 @@ import org.koitharu.kotatsu.parsers.model.MangaState
 import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
 import org.koitharu.kotatsu.parsers.model.SortOrder
+import org.koitharu.kotatsu.parsers.network.UserAgents
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.json.asTypedList
 import org.koitharu.kotatsu.parsers.util.json.getFloatOrDefault
@@ -38,6 +40,7 @@ internal class MoeTruyenUnofficial (context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.BFANGTEAM, 100) {
 
 	override val configKeyDomain = ConfigKey.Domain("moetruyen.net")
+	override val userAgentKey = ConfigKey.UserAgent(UserAgents.KOTATSU)
 
 	/**
 	 * Public API by SuiCaoDex (Unofficial)
@@ -252,13 +255,22 @@ internal class MoeTruyenUnofficial (context: MangaLoaderContext) :
 			.addEncodedPathSegments("$apiSuffix/chapters/${chapter.url}")
 		val response = webClient.httpGet(url.build()).parseJson()
 		val data = response.getJSONObject("data")
-		return data.getJSONArray("pageUrls").asTypedList<String>().map {
-			MangaPage(
-				id = generateUid(it),
-				url = it,
-				preview = null,
-				source = source,
-			)
+		val pages = data.getJSONArray("pageUrls").asTypedList<String>()
+		val id = data.getJSONObject("chapter").getInt("id")
+
+		if (pages.isEmpty()) {
+			throw ParseException("No pages returned by MoeTruyen", chapter.url)
+		}
+
+		return resolve(webClient, apiDomain, apiSuffix, domain, source, id, pages.size) { generateUid(it) }.ifEmpty {
+			pages.map {
+				MangaPage(
+					id = generateUid(it),
+					url = it,
+					preview = null,
+					source = source,
+				)
+			}
 		}
 	}
 
@@ -275,4 +287,3 @@ internal class MoeTruyenUnofficial (context: MangaLoaderContext) :
 		}.toSet()
 	}
 }
-
