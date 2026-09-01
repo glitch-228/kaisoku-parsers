@@ -16,7 +16,11 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.DUALEOTRUYEN, 60) {
 
 	override val configKeyDomain: ConfigKey.Domain
-		get() = ConfigKey.Domain("dualeotruyendl.com")
+		get() = ConfigKey.Domain(
+			"dualeotruyenuv.com",
+			"dualeotruyencw.com",
+			"dualeotruyendl.com",
+		)
 
 	override val userAgentKey = ConfigKey.UserAgent(UserAgents.CHROME_DESKTOP)
 
@@ -27,7 +31,11 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.UPDATED,
-		SortOrder.POPULARITY,
+		SortOrder.NEWEST,
+		SortOrder.POPULARITY_TODAY,
+		SortOrder.POPULARITY_WEEK,
+		SortOrder.POPULARITY_MONTH,
+		SortOrder.POPULARITY_YEAR,
 	)
 
 	override val filterCapabilities: MangaListFilterCapabilities
@@ -45,7 +53,7 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 			append(domain)
 			when {
 				!filter.query.isNullOrEmpty() -> {
-					append("/tim-kiem.html")
+					append("/tim-kiem")
 					append("?key=")
 					append(filter.query.urlEncoded())
 				}
@@ -53,16 +61,19 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 				filter.tags.isNotEmpty() -> {
 					append("/the-loai/")
 					append(filter.tags.first().key)
-					append(".html")
 				}
 
 				else -> when (order) {
-					SortOrder.POPULARITY -> append("/top-ngay.html")
-					else -> append("/truyen-moi-cap-nhat.html")
+					SortOrder.POPULARITY_TODAY -> append("/top-ngay")
+					SortOrder.POPULARITY_WEEK -> append("/top-tuan")
+					SortOrder.POPULARITY_MONTH -> append("/top-thang")
+					SortOrder.POPULARITY_YEAR -> append("/top-nam")
+					SortOrder.NEWEST -> append("/truyen-tranh-moi")
+					else -> append("/truyen-moi-cap-nhat")
 				}
 			}
 			if (page > 1) {
-				append("?page=")
+				append(if (contains('?')) "&page=" else "?page=")
 				append(page)
 			}
 		}
@@ -91,9 +102,15 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
 		val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH)
 		val author = doc.selectFirst(".info-item:has(.fa-user)")?.textOrNull()?.removePrefix("Tác giả: ")
+		val scanlator = doc.selectFirst(".info-item:has(.fa-pencil)")?.textOrNull()?.removePrefix("Nhóm dịch: ")
+		val altTitles = doc.selectFirst("span.info-item:contains(Tên Khác:)")?.textOrNull()
+			?.removePrefix("Tên Khác: ")
+			?.split(',')
+			?.mapNotNullToSet { it.trim().nullIfEmpty() }
+			.orEmpty()
 
 		return manga.copy(
-			altTitles = setOfNotNull(doc.selectFirst(".box_info_right h2")?.textOrNull()),
+			altTitles = altTitles,
 			tags = doc.select("ul.list-tag-story li a").mapToSet {
 				MangaTag(
 					key = it.attr("href").substringAfterLast('/').substringBefore('.'),
@@ -117,7 +134,7 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 					title = a.text(),
 					number = i + 1f,
 					url = href,
-					scanlator = null,
+					scanlator = scanlator,
 					uploadDate = dateFormat.parseSafe(dateText),
 					branch = null,
 					source = source,
@@ -144,8 +161,16 @@ internal class DuaLeoTruyen(context: MangaLoaderContext) :
 			).closeQuietly()
 		}
 
-		return doc.select(".content_view_chap img").mapIndexed { _, img ->
-			val url = img.absUrl("data-original")
+		return doc.select(".content_view_chap img").mapNotNull { img ->
+			val imageUrl = img.attr("data-img").ifEmpty {
+				img.attr("data-src").ifEmpty {
+					img.attr("data-original").ifEmpty {
+						img.attr("src")
+					}
+				}
+			}.trim()
+			if (imageUrl.isEmpty() || imageUrl.startsWith("data:image/")) return@mapNotNull null
+			val url = imageUrl.toAbsoluteUrl(domain)
 			MangaPage(
 				id = generateUid(url),
 				url = url,

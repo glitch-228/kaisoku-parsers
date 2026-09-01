@@ -154,6 +154,7 @@ internal class DamCoNuong(context: MangaLoaderContext) :
 		val chapterListDiv = doc.selectFirst("ul#chapterList")
 			?: throw ParseException("Chapters list not found!", url)
 
+		val scanlator = doc.select("img[src*=avatar.png]").attr("alt")
 		val chapterLinks = chapterListDiv.select("a.block")
 		val chapters = chapterLinks.mapChapters(reversed = true) { index, a ->
 			val title = a.selectFirst("span.text-ellipsis")?.textOrNull()
@@ -166,7 +167,7 @@ internal class DamCoNuong(context: MangaLoaderContext) :
 				number = index + 1f,
 				volume = 0,
 				url = href,
-				scanlator = null,
+				scanlator = scanlator,
 				uploadDate = parseChapterDate(uploadDate),
 				branch = null,
 				source = source,

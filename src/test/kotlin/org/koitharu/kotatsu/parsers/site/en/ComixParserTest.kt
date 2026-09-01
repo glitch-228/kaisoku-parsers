@@ -21,7 +21,11 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilter
 import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.model.MangaState
 import org.koitharu.kotatsu.parsers.model.SortOrder
+import org.koitharu.kotatsu.parsers.webview.InterceptedRequest
+import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
 import org.json.JSONObject
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 internal class ComixParserTest {
 
@@ -33,8 +37,8 @@ internal class ComixParserTest {
 		val manga = parser.getList(0, SortOrder.UPDATED, MangaListFilter.EMPTY).single()
 
 		assertEquals("Limitless Ascension: Strength Amid Adversity", manga.title)
-		assertEquals("/title/8d9ye-limitless-ascension-strength-amid-adversity", manga.url)
-		assertEquals("https://www.comix.to/title/8d9ye-limitless-ascension-strength-amid-adversity", manga.publicUrl)
+		assertEquals("/title/8d9ye", manga.url)
+		assertEquals("https://comix.to/title/8d9ye", manga.publicUrl)
 		assertEquals("https://img.example/poster-large.webp", manga.coverUrl)
 		assertEquals(0.84f, manga.rating)
 		assertEquals(ContentRating.SAFE, manga.contentRating)
@@ -49,7 +53,10 @@ internal class ComixParserTest {
 		val chapters = checkNotNull(details.chapters)
 		assertEquals(listOf(122f, 123f), chapters.map { it.number })
 		assertEquals("Drake Scans", chapters.last().scanlator)
-		assertEquals("/title/8d9ye-limitless-ascension-strength-amid-adversity/9074688-chapter-123", chapters.last().url)
+		assertEquals(
+			"https://www.comix.to/title/8d9ye-limitless-ascension-strength-amid-adversity/9074688-chapter-123",
+			chapters.last().url,
+		)
 
 		val pages = parser.getPages(chapters.last())
 		assertEquals(
@@ -60,9 +67,9 @@ internal class ComixParserTest {
 			pages.map { it.url },
 		)
 
-		assertTrue(context.requestedUrls.any { it.contains("/api/v1/manga?") })
-		assertTrue(context.requestedUrls.any { it.contains("/api/v1/manga/8d9ye/chapters") && it.contains("_=test-token") })
-		assertTrue(context.requestedUrls.any { it.contains("/api/v1/chapters/9074688") && it.contains("_=test-token") })
+		assertTrue(context.requestedUrls.any { it.contains("/browse?") })
+		assertTrue(context.requestedUrls.any { it.endsWith("/title/8d9ye") })
+		assertTrue(context.requestedUrls.any { it.contains("/9074688-chapter-123") })
 	}
 
 	private class ComixContext : MangaLoaderContext() {
@@ -83,8 +90,35 @@ internal class ComixParserTest {
 				script.contains("__COMIX_SIGN__") -> JSONObject.quote("test-token")
 				script.contains("chapters-fixture") -> JSONObject.quote(CHAPTERS_JSON)
 				script.contains("pages-fixture") -> JSONObject.quote(PAGES_JSON)
+				script.contains("document.documentElement.outerHTML") -> {
+					val initialData = JSONObject().put(
+						"queries",
+						JSONObject().put("detail", JSONObject(DETAILS_JSON)),
+					)
+					"<html><script id=\"initial-data\" type=\"application/json\">$initialData</script></html>"
+				}
 				else -> error("Unexpected JS evaluation: ${script.take(120)}")
 			}
+		}
+
+		override suspend fun interceptWebViewRequests(
+			url: String,
+			config: InterceptionConfig,
+		): List<InterceptedRequest> {
+			val payload = when {
+				url.contains("/browse") -> LIST_JSON
+				url.substringAfterLast('/').substringBefore('-').toLongOrNull() != null -> PAGES_JSON
+				else -> CHAPTERS_JSON
+			}
+			val encoded = URLEncoder.encode(payload, StandardCharsets.UTF_8.name())
+			return listOf(
+				InterceptedRequest(
+					url = "https://kotatsu.intercept/result#data=$encoded",
+					method = "GET",
+					headers = emptyMap(),
+					timestamp = 0L,
+				),
+			)
 		}
 
 		override fun getConfig(source: MangaSource): MangaSourceConfig = SourceConfigMock()
@@ -162,7 +196,7 @@ internal class ComixParserTest {
 								"large": "https://img.example/poster-large.webp",
 								"medium": "https://img.example/poster-medium.webp"
 							},
-							"status": "ongoing",
+							"status": "releasing",
 							"year": 2026,
 							"ratedAvg": 8.4,
 							"contentRating": "safe",
@@ -185,7 +219,7 @@ internal class ComixParserTest {
 					"poster": {
 						"large": "https://img.example/poster-large.webp"
 					},
-					"status": "ongoing",
+					"status": "releasing",
 					"year": 2026,
 					"ratedAvg": 8.4,
 					"contentRating": "safe",
@@ -235,13 +269,15 @@ internal class ComixParserTest {
 
 		private const val PAGES_JSON = """
 			{
-				"id": 9074688,
-				"pages": {
-					"baseUrl": "https://img.example/pages/",
-					"items": [
-						{"width": 800, "height": 1200, "url": "01.webp"},
-						{"width": 800, "height": 1200, "url": "02.webp"}
-					]
+				"result": {
+					"id": 9074688,
+					"pages": {
+						"baseUrl": "https://img.example/pages/",
+						"items": [
+							{"width": 800, "height": 1200, "url": "01.webp"},
+							{"width": 800, "height": 1200, "url": "02.webp"}
+						]
+					}
 				}
 			}
 		"""

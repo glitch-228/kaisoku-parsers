@@ -1,273 +1,134 @@
 package org.koitharu.kotatsu.parsers.site.madara.fr
 
-import okhttp3.Headers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
-import org.koitharu.kotatsu.parsers.model.ContentType
-import org.koitharu.kotatsu.parsers.model.Manga
-import org.koitharu.kotatsu.parsers.model.MangaChapter
-import org.koitharu.kotatsu.parsers.model.MangaPage
-import org.koitharu.kotatsu.parsers.model.MangaParserSource
+import org.koitharu.kotatsu.parsers.exception.ParseException
+import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
-import org.koitharu.kotatsu.parsers.util.attrAsRelativeUrl
-import org.koitharu.kotatsu.parsers.util.generateUid
-import org.koitharu.kotatsu.parsers.util.mapChapters
-import org.koitharu.kotatsu.parsers.util.parseHtml
-import org.koitharu.kotatsu.parsers.util.parseSafe
-import org.koitharu.kotatsu.parsers.util.selectFirstOrThrow
-import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
+import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Locale
 
-@MangaSourceParser("HENTAIORIGINES", "Hentai Origines", "fr", ContentType.HENTAI)
+@MangaSourceParser("HENTAIORIGINES", "HentaiOrigines", "fr", ContentType.HENTAI)
 internal class HentaiOrigines(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.HENTAIORIGINES, "hentai-origines.com") {
 
-	override val datePattern = "MMMM d, yyyy"
-	override val listUrl = "catalogue/"
-	override val selectTestAsync = "#manga-chapters-holder li.wp-manga-chapter"
-	override val selectChapter = "li.wp-manga-chapter, div.chapter-item"
+	override val datePattern = "d MMMM yyyy"
 
-	private val chapterDateFormatFr = ThreadLocal.withInitial { SimpleDateFormat(datePattern, sourceLocale) }
-	private val chapterDateFormatFrDayFirst = ThreadLocal.withInitial { SimpleDateFormat("d MMMM yyyy", sourceLocale) }
-	private val chapterDateFormatEn = ThreadLocal.withInitial { SimpleDateFormat(datePattern, Locale.ENGLISH) }
-	private val chapterDateTimeFormatIso = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US) }
+	override val selectDesc = "div.ori-sr-syn-texte"
+	override val selectGenre = "a.ori-sr-genre"
+	override val selectChapter = "div.ori-chl-row"
+	override val selectBodyPage = "main.ori-lec-scene div.reading-content"
 
-	private val chaptersCache = object : LinkedHashMap<String, List<MangaChapter>>(32, 0.75f, true) {
-		override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MangaChapter>>?): Boolean {
-			return size > CHAPTERS_CACHE_SIZE
-		}
-	}
+	override suspend fun getDetails(manga: Manga): Manga = coroutineScope {
+		val fullUrl = manga.url.toAbsoluteUrl(domain)
+		val doc = webClient.httpGet(fullUrl).parseHtml()
 
-	private val pagesCache = object : LinkedHashMap<String, List<MangaPage>>(64, 0.75f, true) {
-		override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MangaPage>>?): Boolean {
-			return size > PAGES_CACHE_SIZE
-		}
-	}
+		val href = doc.selectFirst("head meta[property='og:url']")?.attr("content")?.toRelativeUrl(domain) ?: manga.url
+		val chaptersDeferred = async { loadChapters(href, doc) }
 
-	@Volatile
-	private var preferAdminAjaxChapters = false
+		val desc = doc.select(selectDesc).html()
 
-	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
-		.set("Referer", "https://$domain/")
-		.set("Origin", "https://$domain")
-		.build()
-
-	override suspend fun getChapters(manga: Manga, doc: Document): List<MangaChapter> {
-		val cacheKey = normalizeMangaUrl(manga.url)
-		synchronized(chaptersCache) {
-			chaptersCache[cacheKey]?.let { return it }
-		}
-		val chapters = parseChapterList(doc.body().select(selectChapter), sourceOrderFallback = true)
-		if (chapters.isNotEmpty()) {
-			synchronized(chaptersCache) {
-				chaptersCache[cacheKey] = chapters
+		val state = doc.selectFirst("span.ori-sr-badge-statut")?.let {
+			when (it.text().lowercase()) {
+				in ongoing -> MangaState.ONGOING
+				in finished -> MangaState.FINISHED
+				in abandoned -> MangaState.ABANDONED
+				in paused -> MangaState.PAUSED
+				else -> null
 			}
-			return chapters
 		}
-		return loadChapters(manga.url, doc)
+
+		manga.copy(
+			title = doc.selectFirst("h1")?.textOrNull() ?: manga.title,
+			url = href,
+			publicUrl = href.toAbsoluteUrl(domain),
+			tags = doc.body().select(selectGenre).mapToSet { a -> createMangaTag(a) }.filterNotNull().toSet(),
+			description = desc,
+			altTitles = emptySet(),
+			state = state,
+			chapters = chaptersDeferred.await(),
+			contentRating = if (doc.selectFirst(".adult-confirm") != null || isNsfwSource) {
+				ContentRating.ADULT
+			} else {
+				ContentRating.SAFE
+			},
+		)
 	}
+
+	override suspend fun getChapters(manga: Manga, doc: Document): List<MangaChapter> = doc.parseChapters()
 
 	override suspend fun loadChapters(mangaUrl: String, document: Document): List<MangaChapter> {
-		val cacheKey = normalizeMangaUrl(mangaUrl)
-		synchronized(chaptersCache) {
-			chaptersCache[cacheKey]?.let { return it }
-		}
-
-		val doc = requestAsyncChapters(mangaUrl, document)
-
-		val chaptersFromAsync = parseChapterList(doc.select(selectChapter), sourceOrderFallback = true)
-		val chapters = if (chaptersFromAsync.isNotEmpty()) {
-			chaptersFromAsync
-		} else {
-			parseChapterList(document.body().select(selectChapter), sourceOrderFallback = true)
-		}
-		if (chapters.isNotEmpty()) {
-			synchronized(chaptersCache) {
-				chaptersCache[cacheKey] = chapters
-			}
-		}
-		return chapters
+		val url = mangaUrl.toAbsoluteUrl(domain).removeSuffix('/') + "/ajax/chapters/"
+		val doc = webClient.httpPost(url, emptyMap()).parseHtml()
+		return doc.parseChapters()
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val cacheKey = chapter.url.substringBefore('?')
-		synchronized(pagesCache) {
-			pagesCache[cacheKey]?.let { return it }
-		}
-		val pages = super.getPages(chapter)
-		if (pages.isNotEmpty()) {
-			synchronized(pagesCache) {
-				pagesCache[cacheKey] = pages
+		val fullUrl = chapter.url.toAbsoluteUrl(domain)
+		val doc = webClient.httpGet(fullUrl).parseHtml()
+		val root = doc.body().selectFirst(selectBodyPage) ?: throw ParseException(
+			"No image found, try to log in",
+			fullUrl,
+		)
+		return root.select(selectPage).flatMap { div ->
+			div.selectOrThrow("img").map { img ->
+				val url = img.attr("src").trim().toRelativeUrl(domain)
+				MangaPage(
+					id = generateUid(url),
+					url = url,
+					preview = null,
+					source = source,
+				)
 			}
 		}
-		return pages
 	}
 
-	private fun parseChapterList(items: List<Element>, sourceOrderFallback: Boolean): List<MangaChapter> {
-		return items.mapChapters(reversed = true) { i, li ->
-			val a = li.selectFirstOrThrow("a")
+	override suspend fun getRelatedManga(seed: Manga): List<Manga> {
+		val doc = webClient.httpGet(seed.url.toAbsoluteUrl(domain)).parseHtml()
+		val root = doc.body().selectFirst("div.ori-sr-meme-grid") ?: return emptyList()
+		return root.select("a.ori-sr-meme-card").mapNotNull { a ->
 			val href = a.attrAsRelativeUrl("href")
-			val chapterTitle = (a.selectFirst("p")?.text() ?: a.ownText()).trim().ifEmpty { null }
-			val dateText = extractDateText(li)
-
-			MangaChapter(
+			Manga(
 				id = generateUid(href),
-				title = chapterTitle,
-				number = parseChapterNumber(chapterTitle, href, fallback = if (sourceOrderFallback) i + 1f else 0f),
-				volume = 0,
-				url = href + stylePage,
-				uploadDate = parseUploadDate(dateText),
+				url = href,
+				publicUrl = href.toAbsoluteUrl(a.host ?: domain),
+				altTitles = emptySet(),
+				title = a.selectFirst("span.ori-sr-meme-titre")?.text().orEmpty(),
+				authors = emptySet(),
+				coverUrl = a.selectFirst("img")?.src(),
+				tags = emptySet(),
+				rating = RATING_UNKNOWN,
+				state = null,
+				contentRating = if (isNsfwSource) ContentRating.ADULT else null,
 				source = source,
-				scanlator = null,
-				branch = null,
 			)
 		}
 	}
 
-	private suspend fun requestAsyncChapters(mangaUrl: String, document: Document): Document {
-		val mangaId = document.select("div#manga-chapters-holder").attr("data-id").trim()
-
-		if (preferAdminAjaxChapters && mangaId.isNotEmpty()) {
-			val adminAjaxDoc = requestChaptersViaAdminAjax(mangaId)
-			if (adminAjaxDoc.select(selectChapter).isNotEmpty()) {
-				return adminAjaxDoc
+	private fun Document.parseChapters(): List<MangaChapter> {
+		val dateFormat = SimpleDateFormat(datePattern, sourceLocale)
+		return select("div.ori-chl-row").mapChapters(reversed = true) { i, row ->
+			val a = row.selectFirstOrThrow("a.ori-chl-corps")
+			val href = a.attrAsRelativeUrl("href")
+			val link = href + stylePage
+			val name = a.selectFirst("span.ori-chl-nom-long")?.text().orEmpty().ifEmpty {
+				row.attr("data-nom")
 			}
+			val dateText = row.selectFirst("span.ori-chl-date")?.attr("title")
+			MangaChapter(
+				id = generateUid(href),
+				url = link,
+				title = name,
+				number = i + 1f,
+				volume = 0,
+				branch = null,
+				uploadDate = parseChapterDate(dateFormat, dateText),
+				scanlator = null,
+				source = source,
+			)
 		}
-
-		val ajaxUrl = mangaUrl.toAbsoluteUrl(domain).removeSuffix("/") + "/ajax/chapters/"
-		val ajaxDoc = webClient.httpPost(ajaxUrl, emptyMap()).parseHtml()
-		if (ajaxDoc.select(selectChapter).isNotEmpty()) {
-			preferAdminAjaxChapters = false
-			return ajaxDoc
-		}
-
-		if (!preferAdminAjaxChapters && mangaId.isNotEmpty()) {
-			val adminAjaxDoc = requestChaptersViaAdminAjax(mangaId)
-			if (adminAjaxDoc.select(selectChapter).isNotEmpty()) {
-				preferAdminAjaxChapters = true
-				return adminAjaxDoc
-			}
-		}
-
-		return ajaxDoc
-	}
-
-	private suspend fun requestChaptersViaAdminAjax(mangaId: String): Document {
-		val adminAjaxUrl = "https://$domain/wp-admin/admin-ajax.php"
-		val postData = postDataReq + mangaId
-		return webClient.httpPost(adminAjaxUrl, postData).parseHtml()
-	}
-
-	private fun parseUploadDate(raw: String?): Long {
-		val normalizedRaw = raw?.trim()?.replace('\u00a0', ' ')?.ifEmpty { return 0L } ?: return 0L
-		val date = normalizedRaw.lowercase(Locale.ROOT)
-		val number = DATE_NUMBER.find(date)?.groupValues?.getOrNull(1)?.toIntOrNull()
-		if (number != null) {
-			val now = System.currentTimeMillis()
-			when {
-				DATE_SECONDS.containsMatchIn(date) -> return now - number * SECOND_MILLIS
-				DATE_MINUTES.containsMatchIn(date) -> return now - number * MINUTE_MILLIS
-				DATE_HOURS.containsMatchIn(date) -> return now - number * HOUR_MILLIS
-				DATE_DAYS.containsMatchIn(date) -> return now - number * DAY_MILLIS
-				DATE_WEEKS.containsMatchIn(date) -> return now - number * WEEK_MILLIS
-				DATE_MONTHS.containsMatchIn(date) -> return Calendar.getInstance().apply { add(Calendar.MONTH, -number) }.timeInMillis
-				DATE_YEARS.containsMatchIn(date) -> return Calendar.getInstance().apply { add(Calendar.YEAR, -number) }.timeInMillis
-			}
-		}
-		if ("hier" in date || "yesterday" == date) {
-			return startOfDay(daysAgo = 1)
-		}
-		if ("aujourd" in date || "today" == date) {
-			return startOfDay(daysAgo = 0)
-		}
-
-		val parsedFr = chapterDateFormatFr.get().parseSafe(normalizedRaw)
-		if (parsedFr != 0L) return parsedFr
-
-		val parsedFrDayFirst = chapterDateFormatFrDayFirst.get().parseSafe(normalizedRaw)
-		if (parsedFrDayFirst != 0L) return parsedFrDayFirst
-
-		val parsedEn = chapterDateFormatEn.get().parseSafe(normalizedRaw)
-		if (parsedEn != 0L) return parsedEn
-
-		return chapterDateTimeFormatIso.get().parseSafe(normalizedRaw)
-	}
-
-	private fun extractDateText(li: Element): String? {
-		return li.selectFirst("a.c-new-tag")?.attr("title")?.trim()?.ifEmpty { null }
-			?: li.selectFirst(".timediff a[title]")?.attr("title")?.trim()?.ifEmpty { null }
-			?: li.selectFirst(".timediff i")?.text()?.trim()?.ifEmpty { null }
-			?: li.selectFirst(".chapter-release-date > i")?.text()?.trim()?.ifEmpty { null }
-			?: li.selectFirst(selectDate)?.text()?.trim()?.ifEmpty { null }
-	}
-
-	private fun startOfDay(daysAgo: Int): Long {
-		return Calendar.getInstance().apply {
-			if (daysAgo != 0) {
-				add(Calendar.DAY_OF_MONTH, -daysAgo)
-			}
-			set(Calendar.HOUR_OF_DAY, 0)
-			set(Calendar.MINUTE, 0)
-			set(Calendar.SECOND, 0)
-			set(Calendar.MILLISECOND, 0)
-		}.timeInMillis
-	}
-
-	private fun parseChapterNumber(title: String?, href: String, fallback: Float): Float {
-		title?.let {
-			CHAPTER_TITLE_NUMBER.find(it)?.groupValues?.getOrNull(1)?.normalizeChapterNumber()?.let { n ->
-				return n
-			}
-		}
-		CHAPTER_URL_NUMBER.find(href)?.groupValues?.getOrNull(1)?.normalizeChapterNumberFromSlug()?.let { n ->
-			return n
-		}
-		return fallback
-	}
-
-	private fun String.normalizeChapterNumber(): Float? {
-		val cleaned = trim().replace(',', '.')
-		return cleaned.toFloatOrNull()
-	}
-
-	private fun String.normalizeChapterNumberFromSlug(): Float? {
-		val token = trim().lowercase(Locale.ROOT)
-		val numericHead = CHAPTER_SLUG_NUMBER.find(token)?.value ?: return null
-		if (DECIMAL_SLUG.matches(numericHead)) {
-			return numericHead.replace('-', '.').toFloatOrNull()
-		}
-		return numericHead.toFloatOrNull()
-	}
-
-	private fun normalizeMangaUrl(url: String): String {
-		return url.substringBefore('?').removeSuffix("/")
-	}
-
-	private companion object {
-		private const val CHAPTERS_CACHE_SIZE = 100
-		private const val PAGES_CACHE_SIZE = 200
-		private const val SECOND_MILLIS = 1_000L
-		private const val MINUTE_MILLIS = 60_000L
-		private const val HOUR_MILLIS = 3_600_000L
-		private const val DAY_MILLIS = 86_400_000L
-		private const val WEEK_MILLIS = 604_800_000L
-
-		private val CHAPTER_TITLE_NUMBER = Regex("(?i)\\bchap(?:itre|ter)?\\.?\\s*([0-9]+(?:[.,][0-9]+)?)")
-		private val CHAPTER_URL_NUMBER = Regex("(?i)/(?:chapitre|chapter)-([0-9]+(?:-[0-9]+)?)(?:[^0-9]|$)")
-		private val CHAPTER_SLUG_NUMBER = Regex("^[0-9]+(?:-[0-9]+)?")
-		private val DECIMAL_SLUG = Regex("^[0-9]+-[0-9]+$")
-
-		private val DATE_NUMBER = Regex("(\\d+)")
-		private val DATE_SECONDS = Regex("\\b(seconde|secondes|sec|second|seconds)\\b")
-		private val DATE_MINUTES = Regex("\\b(minute|minutes|min)\\b")
-		private val DATE_HOURS = Regex("\\b(heure|heures|hour|hours)\\b|\\b\\d+\\s*h\\b")
-		private val DATE_DAYS = Regex("\\b(jour|jours|day|days)\\b|\\b\\d+\\s*d\\b")
-		private val DATE_WEEKS = Regex("\\b(semaine|semaines|week|weeks|sem)\\b")
-		private val DATE_MONTHS = Regex("\\b(mois|month|months)\\b")
-		private val DATE_YEARS = Regex("\\b(an|ans|année|années|year|years)\\b")
 	}
 }

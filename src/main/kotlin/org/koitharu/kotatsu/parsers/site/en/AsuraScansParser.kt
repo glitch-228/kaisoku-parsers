@@ -30,7 +30,7 @@ import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.TreeMap
 
-@MangaSourceParser("ASURASCANS", "AsuraScans", "en")
+@MangaSourceParser("ASURASCANS", "Asura Scans", "en")
 internal class AsuraScansParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.ASURASCANS, pageSize = 20) {
 

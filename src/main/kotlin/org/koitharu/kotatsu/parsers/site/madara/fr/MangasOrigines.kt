@@ -26,9 +26,12 @@ internal class MangasOrigines(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANGASORIGINES, "mangas-origines.fr") {
 	override val datePattern = "MMMM d, yyyy"
 	override val tagPrefix = "manga-genres/"
-	override val listUrl = "catalogues/"
-	override val selectTestAsync = "#manga-chapters-holder li.wp-manga-chapter"
-	override val selectChapter = "li.wp-manga-chapter, div.chapter-item"
+	override val listUrl = "oeuvre/"
+	override val selectDesc = "div.ori-sr-syn-texte"
+	override val selectGenre = "a.ori-sr-genre"
+	override val selectTestAsync = "div.ori-chl-row"
+	override val selectChapter = "div.ori-chl-row"
+	override val selectBodyPage = "main.ori-lec-scene div.reading-content"
 
 	private val chapterDateFormatFr = ThreadLocal.withInitial { SimpleDateFormat(datePattern, sourceLocale) }
 	private val chapterDateFormatFrDayFirst = ThreadLocal.withInitial { SimpleDateFormat("d MMMM yyyy", sourceLocale) }
@@ -105,9 +108,14 @@ internal class MangasOrigines(context: MangaLoaderContext) :
 
 	private fun parseChapterList(items: List<Element>, sourceOrderFallback: Boolean): List<MangaChapter> {
 		return items.mapChapters(reversed = true) { i, li ->
-			val a = li.selectFirstOrThrow("a")
+			val a = li.selectFirst("a.ori-chl-corps") ?: li.selectFirstOrThrow("a")
 			val href = a.attrAsRelativeUrl("href")
-			val chapterTitle = (a.selectFirst("p")?.text() ?: a.ownText()).trim().ifEmpty { null }
+			val chapterTitle = (
+				a.selectFirst("span.ori-chl-nom-long")?.text()
+					?: li.attr("data-nom").takeIf { it.isNotBlank() }
+					?: a.selectFirst("p")?.text()
+					?: a.ownText()
+			).trim().ifEmpty { null }
 			val dateText = extractDateText(li)
 
 			MangaChapter(
@@ -156,7 +164,8 @@ internal class MangasOrigines(context: MangaLoaderContext) :
 	}
 
 	private fun extractDateText(li: Element): String? {
-		return li.selectFirst("a.c-new-tag")?.attr("title")?.trim()?.ifEmpty { null }
+		return li.selectFirst("span.ori-chl-date")?.attr("title")?.trim()?.ifEmpty { null }
+			?: li.selectFirst("a.c-new-tag")?.attr("title")?.trim()?.ifEmpty { null }
 			?: li.selectFirst(".timediff a[title]")?.attr("title")?.trim()?.ifEmpty { null }
 			?: li.selectFirst(".timediff i")?.text()?.trim()?.ifEmpty { null }
 			?: li.selectFirst(".chapter-release-date > i")?.text()?.trim()?.ifEmpty { null }

@@ -246,7 +246,7 @@ internal class Comix(context: MangaLoaderContext) :
             publicUrl = "https://comix.to/title/$hashId",
             coverUrl = coverUrl,
             title = title,
-            altTitles = emptySet(),
+            altTitles = parseAltTitles(json),
             description = description,
             rating = if (rating > 0) (rating / 10.0).toFloat() else RATING_UNKNOWN,
             tags = parseTerms(json),
@@ -806,12 +806,32 @@ internal class Comix(context: MangaLoaderContext) :
     }
 
     private fun parseAuthors(json: JSONObject): Set<String> {
-        val authors = json.optJSONArray("authors") ?: json.optJSONArray("author") ?: return emptySet()
-        return (0 until authors.length()).mapNotNullTo(LinkedHashSet()) { i ->
-            val item = authors.optJSONObject(i) ?: return@mapNotNullTo null
-            item.optString("title").nullIfEmpty() ?: item.optString("name").nullIfEmpty()
+		val result = LinkedHashSet<String>()
+		for (key in arrayOf("authors", "author", "artists", "artist")) {
+			val people = json.optJSONArray(key) ?: continue
+			for (i in 0 until people.length()) {
+				val item = people.optJSONObject(i) ?: continue
+				val name = item.optString("title").nullIfEmpty() ?: item.optString("name").nullIfEmpty()
+				if (name != null) result += name
+			}
         }
+		return result
     }
+
+	private fun parseAltTitles(json: JSONObject): Set<String> {
+		val result = LinkedHashSet<String>()
+		for (key in arrayOf("altTitles", "alternativeTitles", "alternative_titles")) {
+			val titles = json.optJSONArray(key) ?: continue
+			for (i in 0 until titles.length()) {
+				val title = titles.optString(i).nullIfEmpty()
+					?: titles.optJSONObject(i)?.let {
+						it.optString("title").nullIfEmpty() ?: it.optString("name").nullIfEmpty()
+					}
+				if (title != null) result += title
+			}
+		}
+		return result
+	}
 
     private fun parseRelativeDate(date: String?): Long {
         if (date.isNullOrBlank()) return 0L
