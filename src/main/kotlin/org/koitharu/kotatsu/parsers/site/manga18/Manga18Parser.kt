@@ -62,38 +62,46 @@ internal abstract class Manga18Parser(
 	protected open val datePattern = "dd-MM-yyyy"
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
+		val tag = filter.tags.oneOrThrowIfMany()
 		val url = buildString {
 			append("https://")
 			append(domain)
 			append('/')
 
-			if (filter.tags.isNotEmpty() && filter.query != null) {
-				throw IllegalArgumentException("Search is not supported with tags")
-			}
+			when {
+				tag != null && !filter.query.isNullOrBlank() -> {
+					throw IllegalArgumentException("Search is not supported with tags")
+				}
 
-			if (filter.tags.isNotEmpty()) {
-				filter.tags.oneOrThrowIfMany()?.let {
+				tag != null -> {
 					append(tagUrl)
-					append(it.key)
+					append(tag.key)
 					append('/')
-					append(page.toString())
+					append(page)
+				}
+
+				!filter.query.isNullOrBlank() -> {
+					append(listUrl)
+					append(page)
+					append("?search=")
+					append(filter.query.orEmpty().urlEncoded())
+					append("&order_by=latest")
+				}
+
+				else -> {
+					append(listUrl)
+					append(page)
 				}
 			}
 
-			if (!filter.query.isNullOrEmpty()) {
-				append(listUrl)
-				append(page.toString())
-				append("?search=")
-				append(filter.query.urlEncoded())
-				append("&order_by=latest")
-			}
-
-			append("?order_by=")
-			when (order) {
-				SortOrder.POPULARITY -> append("views")
-				SortOrder.UPDATED -> append("lastest")
-				SortOrder.ALPHABETICAL -> append("name")
-				else -> append("latest")
+			if (filter.query.isNullOrBlank()) {
+				append("?order_by=")
+				when (order) {
+					SortOrder.POPULARITY -> append("views")
+					SortOrder.UPDATED -> append("latest")
+					SortOrder.ALPHABETICAL -> append("name")
+					else -> append("latest")
+				}
 			}
 		}
 

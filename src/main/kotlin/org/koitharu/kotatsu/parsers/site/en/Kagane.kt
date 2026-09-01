@@ -1,111 +1,112 @@
 package org.koitharu.kotatsu.parsers.site.en
 
-import okhttp3.Interceptor
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
-import org.json.JSONArray
-import org.json.JSONObject
-import org.jsoup.HttpStatusException
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.exception.ParseException
-import org.koitharu.kotatsu.parsers.model.*
-import org.koitharu.kotatsu.parsers.util.*
-import java.math.BigInteger
+import org.koitharu.kotatsu.parsers.network.CloudFlareHelper
+
+import org.koitharu.kotatsu.parsers.model.ContentRating
+import org.koitharu.kotatsu.parsers.model.Manga
+import org.koitharu.kotatsu.parsers.model.MangaChapter
+import org.koitharu.kotatsu.parsers.model.MangaListFilter
+import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
+import org.koitharu.kotatsu.parsers.model.MangaListFilterOptions
+import org.koitharu.kotatsu.parsers.model.MangaPage
+import org.koitharu.kotatsu.parsers.model.MangaParserSource
+import org.koitharu.kotatsu.parsers.model.MangaState
+import org.koitharu.kotatsu.parsers.model.MangaTag
+import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
+import org.koitharu.kotatsu.parsers.model.SortOrder
+import org.koitharu.kotatsu.parsers.model.ContentType
+
+import org.koitharu.kotatsu.parsers.util.generateUid
+import org.koitharu.kotatsu.parsers.util.parseJson
+import org.koitharu.kotatsu.parsers.util.parseRaw
+import org.koitharu.kotatsu.parsers.util.parseSafe
+import org.koitharu.kotatsu.parsers.util.urlBuilder
+
+import okhttp3.Interceptor
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.IOException
 import java.net.URI
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
-import java.util.*
-import javax.crypto.Cipher
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
+import java.util.EnumSet
+import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * Created from: https://github.com/glitch-228
+ * Modified from: InvalidDavid
+ */
 
 @MangaSourceParser("KAGANE", "Kagane")
 internal class Kagane(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.KAGANE, pageSize = 35) {
 
     override val configKeyDomain = ConfigKey.Domain("kagane.to")
-    private val apiUrl = "https://kagane.to"
+    private val apiUrl = "https://$domain"
 
-    override val availableSortOrders: Set<SortOrder> = EnumSet.of(
-        SortOrder.UPDATED,
-        SortOrder.POPULARITY,
-        SortOrder.NEWEST,
-        SortOrder.ALPHABETICAL
+    private val dataSaverKey = ConfigKey.PreferredImageServer(
+        presetValues = mapOf(
+            "false" to "Normal",
+            "true" to "Data saving"
+        ),
+        defaultValue = "false",
     )
+
+    private val isDataSaver: Boolean
+        get() = config[dataSaverKey] == "true"
 
     override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
         super.onCreateConfig(keys)
-        keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
+        keys.add(dataSaverKey)
     }
 
-    override val filterCapabilities: MangaListFilterCapabilities
-        get() = MangaListFilterCapabilities(
-            isSearchSupported = true,
-            isSearchWithFiltersSupported = true,
-            isMultipleTagsSupported = true
-        )
-
-    private var genresCache: Set<MangaTag>? = null
-    private val UUID_REGEX = Regex(
-        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+    override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+        SortOrder.RELEVANCE,
+        SortOrder.POPULARITY,
+        SortOrder.POPULARITY_ASC,
+        SortOrder.RATING,
+        SortOrder.RATING_ASC,
+        SortOrder.UPDATED,
+        SortOrder.UPDATED_ASC,
+        SortOrder.NEWEST,
+        SortOrder.NEWEST_ASC,
+        SortOrder.ALPHABETICAL,
+        SortOrder.ALPHABETICAL_DESC,
     )
 
-    private companion object {
-        val KAGANE_LANGS = arrayOf(
-            "en",
-            "ja",
-            "ko",
-            "zh-Hans",
-            "zh-Hant",
-            "es",
-            "es-419",
-            "fr",
-            "de",
-            "pt",
-            "pt-BR",
-            "ru",
-            "it",
-            "id",
-            "vi",
-            "th",
-            "pl",
-            "hi",
-            "ar",
-        )
-    }
+    override val filterCapabilities = MangaListFilterCapabilities(
+        isSearchSupported = true,
+        isSearchWithFiltersSupported = true,
+        isMultipleTagsSupported = true,
+        isTagsExclusionSupported = true,
+    )
 
-    // ---- Debug logging (grep logcat for "KAGANE_DBG") ----
-    private fun dbg(msg: String) = println("KAGANE_DBG: $msg")
-
-    private fun ByteArray.headHex(n: Int = 16): String =
-        take(n).joinToString(" ") { "%02x".format(it.toInt() and 0xFF) }
-
-    private fun signedMessageType(bytes: ByteArray): String {
-        // Widevine SignedMessage: field 1 (tag 0x08) = type varint
-        if (bytes.size >= 2 && bytes[0].toInt() == 0x08) {
-            return when (bytes[1].toInt() and 0xFF) {
-                1 -> "LICENSE_REQUEST(1)"
-                2 -> "LICENSE(2)"
-                3 -> "ERROR_RESPONSE(3)"
-                4 -> "SERVICE_CERTIFICATE_REQUEST(4)"
-                5 -> "SERVICE_CERTIFICATE(5)"
-                else -> "type=${bytes[1].toInt() and 0xFF}"
-            }
-        }
-        return "unknown(${bytes.headHex(4)})"
+    private fun Locale.toKaganeLangCode(): String {
+        if (language == "pt" && country.equals("br", ignoreCase = true)) return "pt-BR"
+        if (language == "es" && country == "419") return "es-419"
+        if (language == "zh" && country.equals("CN", ignoreCase = true)) return "zh-Hans"
+        if (language == "zh" && country.equals("TW", ignoreCase = true)) return "zh-Hant"
+        return language
     }
 
     override suspend fun getFilterOptions(): MangaListFilterOptions {
-        val genres = genresCache ?: fetchGenres().also { genresCache = it }
+        val genres = genresMutex.withLock {
+            genresCache ?: fetchGenres().also { genresCache = it }
+        }
         return MangaListFilterOptions(
             availableTags = genres,
             availableContentRating = EnumSet.of(
@@ -113,8 +114,26 @@ internal class Kagane(context: MangaLoaderContext) :
                 ContentRating.SUGGESTIVE,
                 ContentRating.ADULT,
             ),
+            availableStates = EnumSet.of(
+                MangaState.ONGOING,
+                MangaState.FINISHED,
+                MangaState.PAUSED,
+                MangaState.ABANDONED,
+            ),
+            availableContentTypes = EnumSet.of(
+                ContentType.MANGA,
+                ContentType.MANHWA,
+                ContentType.MANHUA,
+                ContentType.COMICS,
+                ContentType.OTHER,
+            ),
+            availableLocales = KAGANE_LANGS,
         )
     }
+
+    @Volatile
+    private var genresCache: Set<MangaTag>? = null
+    private val genresMutex = Mutex()
 
     private suspend fun fetchGenres(): Set<MangaTag> {
         val headers = getRequestHeaders().newBuilder()
@@ -132,16 +151,15 @@ internal class Kagane(context: MangaLoaderContext) :
             buildSet {
                 for (i in 0 until genres.length()) {
                     val item = genres.optJSONObject(i) ?: continue
-                    val id = item.optString("genre_id").ifBlank { item.optString("id") }
-                    val title = item.optString("genre_name")
-                        .ifBlank { item.optString("genreName") }
-                        .ifBlank { item.optString("name") }
-                        .ifBlank { item.optString("title") }
+                    val id = item.optGenreId()
+                    val title = item.optGenreName()
                     if (id.isNotBlank() && title.isNotBlank() && UUID_REGEX.matches(id)) {
                         add(MangaTag(title, id, source))
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             emptySet()
         }
@@ -158,14 +176,30 @@ internal class Kagane(context: MangaLoaderContext) :
 
     override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
         val sortParam = when (order) {
-            SortOrder.UPDATED -> "updated_at,desc"
+            SortOrder.RELEVANCE -> ""
             SortOrder.POPULARITY -> "total_views,desc"
+            SortOrder.POPULARITY_ASC -> "total_views,asc"
+            SortOrder.RATING -> "avg_views,desc"
+            SortOrder.RATING_ASC -> "avg_views,asc"
+            SortOrder.UPDATED -> "updated_at,desc"
+            SortOrder.UPDATED_ASC -> "updated_at,asc"
             SortOrder.NEWEST -> "created_at,desc"
+            SortOrder.NEWEST_ASC -> "created_at,asc"
             SortOrder.ALPHABETICAL -> "series_name,asc"
+            SortOrder.ALPHABETICAL_DESC -> "series_name,desc"
             else -> "updated_at,desc"
         }
 
-        val url = "$apiUrl/api/v2/search/series?page=${page - 1}&size=$pageSize&sort=$sortParam"
+        val urlBuilder = "$apiUrl/api/v2/search/series".toHttpUrl().newBuilder()
+            .addQueryParameter("page", (page - 1).toString())
+            .addQueryParameter("size", pageSize.toString())
+        if (sortParam.isNotBlank()) {
+            urlBuilder.addQueryParameter("sort", sortParam)
+        }
+        if (!filter.query.isNullOrEmpty()) {
+            urlBuilder.addQueryParameter("exact", "1")
+        }
+        val url = urlBuilder.build().toString()
         val jsonBody = JSONObject()
         if (!filter.query.isNullOrEmpty()) {
             jsonBody.put("title", filter.query)
@@ -176,7 +210,12 @@ internal class Kagane(context: MangaLoaderContext) :
             put("Mixed")
         })
         jsonBody.put("content_lang", JSONArray().apply {
-            KAGANE_LANGS.forEach(::put)
+            val selectedLocale = filter.locale
+            if (selectedLocale != null) {
+                put(selectedLocale.toKaganeLangCode())
+            } else {
+                KAGANE_LANGS.forEach(::put)
+            }
         })
 
         val genreIds = filter.tags.map { it.key }.filter { UUID_REGEX.matches(it) }
@@ -211,34 +250,49 @@ internal class Kagane(context: MangaLoaderContext) :
             }
         })
 
+        if (filter.states.isNotEmpty()) {
+            val statuses = JSONArray()
+            filter.states.forEach { state ->
+                when (state) {
+                    MangaState.ONGOING -> statuses.put("Ongoing")
+                    MangaState.FINISHED -> statuses.put("Completed")
+                    MangaState.PAUSED -> statuses.put("Hiatus")
+                    MangaState.ABANDONED -> statuses.put("Abandoned")
+                    else -> Unit
+                }
+            }
+            if (statuses.length() > 0) {
+                jsonBody.put("upload_status", statuses)
+            }
+        }
+
+        if (filter.types.isNotEmpty()) {
+            val formats = JSONArray()
+            filter.types.forEach { type ->
+                when (type) {
+                    ContentType.MANGA -> formats.put("Manga")
+                    ContentType.MANHWA -> formats.put("Manhwa")
+                    ContentType.MANHUA -> formats.put("Manhua")
+                    ContentType.COMICS -> formats.put("Comic")
+                    ContentType.OTHER -> formats.put("Other")
+                    else -> Unit
+                }
+            }
+            if (formats.length() > 0) {
+                jsonBody.put("format", formats)
+            }
+        }
+
         val headers = getRequestHeaders().newBuilder()
             .add("Origin", "https://$domain")
             .add("Referer", "https://$domain/")
             .build()
 
-        val responseBody = try {
-            webClient.httpPost(url.toHttpUrl(), jsonBody, headers).parseRaw()
-        } catch (e: HttpStatusException) {
-            // Always surface 403 via the Cloudflare verification path — the interceptor below
-            // identifies block pages *and* challenge pages, not just "Just a moment…" challenges.
-            if (e.statusCode == 403 || e.statusCode == 429 || e.statusCode == 503) {
-                requestCloudflareVerification(url, e)
-            } else {
-                throw e
-            }
-        } catch (e: ParseException) {
-            // Proxy/network-level errors carrying the same markers should also relaunch the
-            // verification rather than presenting as a bare parse failure.
-            val causeMessage = e.message.orEmpty() + " " + (e.cause?.message.orEmpty())
-            if (causeMessage.contains("CloudFlare", ignoreCase = true) ||
-                causeMessage.contains("cf-mitigated", ignoreCase = true) ||
-                causeMessage.contains("cf-error-details", ignoreCase = true)
-            ) {
-                requestCloudflareVerification(url, e)
-            } else {
-                throw e
-            }
-        }
+        val responseBody = executeWithCloudflareCheck(
+            url = url,
+            block = { webClient.httpPost(url.toHttpUrl(), jsonBody, headers) },
+            parse = { it.parseRaw() },
+        )
 
         if (responseBody.isCloudflareChallenge()) {
             requestCloudflareVerification(url)
@@ -246,7 +300,7 @@ internal class Kagane(context: MangaLoaderContext) :
 
         val response = try {
             JSONObject(responseBody)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             throw Exception("Invalid JSON search response: $responseBody")
         }
 
@@ -280,7 +334,7 @@ internal class Kagane(context: MangaLoaderContext) :
                 authors = emptySet(),
                 state = null,
                 source = source,
-                contentRating = parseContentRating(item.optString("content_rating"))
+                contentRating = parseContentRating(item.optString("content_rating")),
             )
         }
     }
@@ -292,12 +346,16 @@ internal class Kagane(context: MangaLoaderContext) :
             .add("Origin", "https://$domain")
             .add("Referer", "https://$domain/")
             .build()
-        val resp = webClient.httpGet(url, headers)
+        val resp = executeWithCloudflareCheck(
+            url = url,
+            block = { webClient.httpGet(url, headers) },
+            parse = { it },
+        )
         val respBody = resp.body?.string() ?: ""
         if (!resp.isSuccessful) throw Exception("Details error ${resp.code}: $respBody")
         val json = try {
             JSONObject(respBody)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             throw Exception("Invalid JSON details: $respBody")
         }
 
@@ -325,11 +383,8 @@ internal class Kagane(context: MangaLoaderContext) :
                         }
                     }
                     is JSONObject -> {
-                        val key = item.optString("genre_id").ifBlank { item.optString("id") }
-                        val name = item.optString("genre_name")
-                            .ifBlank { item.optString("genreName") }
-                            .ifBlank { item.optString("name") }
-                            .ifBlank { item.optString("title") }
+                        val key = item.optGenreId()
+                        val name = item.optGenreName()
                         if (key.isNotBlank() && name.isNotBlank()) {
                             MangaTag(name, key, source)
                         } else {
@@ -495,9 +550,11 @@ internal class Kagane(context: MangaLoaderContext) :
     }
 
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {
-        // Disable related/suggested manga feature
         return emptyList()
     }
+
+    private var cacheUrl = "https://kstatic.to"
+    private var accessToken: String = ""
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val uri = URI(chapter.url)
@@ -524,13 +581,14 @@ internal class Kagane(context: MangaLoaderContext) :
 
         return pages.sortedBy { it.pageNumber }.map { page ->
             val ext = page.ext?.takeIf { it.isNotBlank() } ?: "jxl"
-            val imageUrl = "$cacheUrl/api/v2/books/page".toHttpUrl().newBuilder()
-                .addPathSegment(chapterId)
-                .addPathSegment("${page.pageUuid}.$ext")
-                .addQueryParameter("token", accessToken)
-                .addQueryParameter("is_datasaver", "false")
-                .build()
-                .toString()
+            val imageUrl = "$cacheUrl/api/v2/books/page".toHttpUrl().newBuilder().apply {
+                if (isDataSaver) addPathSegment("datasaver")
+                addPathSegment(chapterId)
+                addPathSegment("${page.pageUuid}.$ext")
+                addQueryParameter("token", accessToken)
+                addQueryParameter("is_datasaver", isDataSaver.toString())
+            }.build().toString()
+
             MangaPage(
                 id = generateUid(imageUrl),
                 url = imageUrl,
@@ -540,9 +598,41 @@ internal class Kagane(context: MangaLoaderContext) :
         }
     }
 
+    private suspend fun <T> executeWithCloudflareCheck(
+        url: String,
+        block: suspend () -> Response,
+        parse: (Response) -> T,
+    ): T {
+        CloudFlareHelper.getClearanceCookie(context.cookieJar, "https://$domain")
+        val response = block()
+        return when (CloudFlareHelper.checkResponseForProtection(response)) {
+            CloudFlareHelper.PROTECTION_NOT_DETECTED -> parse(response)
+            CloudFlareHelper.PROTECTION_CAPTCHA -> {
+                response.close()
+                delay(CLOUDFLARE_RETRY_DELAY_MS.milliseconds)
+                val retryResponse = block()
+                when (CloudFlareHelper.checkResponseForProtection(retryResponse)) {
+                    CloudFlareHelper.PROTECTION_NOT_DETECTED -> parse(retryResponse)
+                    else -> {
+                        retryResponse.close()
+                        requestCloudflareVerification(url)
+                    }
+                }
+            }
+            CloudFlareHelper.PROTECTION_BLOCKED -> {
+                response.close()
+                requestCloudflareVerification(url)
+            }
+            else -> {
+                response.close()
+                requestCloudflareVerification(url)
+            }
+        }
+    }
+
     private fun requestCloudflareVerification(url: String, cause: Throwable? = null): Nothing {
         try {
-            context.requestBrowserAction(this, url)
+            context.requestBrowserAction(this, "https://$domain/")
         } catch (e: UnsupportedOperationException) {
             throw ParseException(
                 "Cloudflare verification required. Open Kagane in WebView and retry.",
@@ -550,21 +640,16 @@ internal class Kagane(context: MangaLoaderContext) :
                 cause ?: e,
             )
         }
-        throw ParseException("Retry after Cloudflare verification.", url, cause)
     }
 
     private fun String.isCloudflareChallenge(): Boolean {
-        // Match any of the CF block/challenge markers *after* the page has finished loading —
-        // including the block-page banner, the challenge-platform script path, and the new
-        // "cf-chl-bypass"-style resumption marker DOMs that a stale clearance cookie can land on.
         return contains("cf-mitigated", ignoreCase = true)
-            || contains("Just a moment", ignoreCase = true)
-            || contains("challenges.cloudflare.com", ignoreCase = true)
-            || contains("/cdn-cgi/challenge-platform/", ignoreCase = true)
-            // CF block-page (Ray ID + "Sorry, you have been blocked") — handled via verification path.
-            || contains("Sorry, you have been blocked", ignoreCase = true)
-            || contains("cf-error-details", ignoreCase = true)
-            || contains("cf-chl-bypass", ignoreCase = true)
+                || contains("Just a moment", ignoreCase = true)
+                || contains("challenges.cloudflare.com", ignoreCase = true)
+                || contains("/cdn-cgi/challenge-platform/", ignoreCase = true)
+                || contains("Sorry, you have been blocked", ignoreCase = true)
+                || contains("cf-error-details", ignoreCase = true)
+                || contains("cf-chl-bypass", ignoreCase = true)
     }
 
     private data class ManifestPage(
@@ -599,63 +684,32 @@ internal class Kagane(context: MangaLoaderContext) :
         }
     }
 
-    private var cacheUrl = "https://kstatic.to"
-    private var accessToken: String = ""
-    private var cachedCert: String? = null
-    private var certificateFetchAttempted = false
     private var integrityToken: String = ""
     private var integrityTokenExp: Long = 0L
 
-    private suspend fun getCertificate(): String? {
-        cachedCert?.let { return it }
-        if (certificateFetchAttempted) return null
-        certificateFetchAttempted = true
-        val url = "$apiUrl/api/v2/static/bin.bin"
-        val req = Request.Builder().url(url)
-            .addHeader("Origin", "https://$domain")
-            .addHeader("Referer", "https://$domain/")
-            .tag(MangaSource::class.java, source)
-            .build()
-
-        val response = runCatching {
-            context.httpClient.newCall(req).await()
-        }.getOrNull()
-        if (response == null) {
-            dbg("bin.bin fetch failed (network)")
-            return null
-        }
-        if (!response.isSuccessful) {
-            dbg("bin.bin http ${response.code}")
-            return null
-        }
-        val bytes = response.body?.bytes()?.takeIf { it.isNotEmpty() }
-        if (bytes == null) {
-            dbg("bin.bin empty body")
-            return null
-        }
-        dbg("bin.bin ok bytes=${bytes.size} head=${bytes.headHex()}")
-
-        val b64 = Base64.getEncoder().encodeToString(bytes)
-        cachedCert = b64
-        return b64
-    }
+    private val isIntegrityTokenValid: Boolean
+        get() = integrityToken.isNotBlank() && System.currentTimeMillis() < integrityTokenExp
 
     private suspend fun getIntegrityToken(): String {
-        val now = System.currentTimeMillis()
-        if (integrityToken.isNotBlank() && now < integrityTokenExp) {
+        if (isIntegrityTokenValid) {
             return integrityToken
         }
-
         val headers = getRequestHeaders().newBuilder()
             .add("Origin", "https://$domain")
             .add("Referer", "https://$domain/")
             .build()
 
-        val response = webClient.httpPost(
-            urlBuilder().addPathSegments("api/integrity").build(),
-            JSONObject(),
-            headers,
-        ).parseJson()
+        val response = executeWithCloudflareCheck(
+            url = "$apiUrl/api/integrity",
+            block = {
+                webClient.httpPost(
+                    urlBuilder().addPathSegments("api/integrity").build(),
+                    JSONObject(),
+                    headers,
+                )
+            },
+            parse = { it.parseJson() },
+        )
 
         val token = response.optString("token")
         if (token.isBlank()) {
@@ -673,719 +727,189 @@ internal class Kagane(context: MangaLoaderContext) :
             .add("Referer", "https://$domain/")
             .add("x-integrity-token", integrityToken)
             .build()
-        val challengeUrl = "$apiUrl/api/v2/books/$chapterId?is_datasaver=false"
-        return webClient.httpPost(challengeUrl.toHttpUrl(), JSONObject(), headers).parseJson()
-    }
-
-    private fun getPssh(chapterId: String): String {
-        val hash = ":$chapterId".sha256().copyOfRange(0, 16)
-
-        // Widevine System ID
-        val systemId = Base64.getDecoder().decode("7e+LqXnWSs6jyCfc1R0h7Q==")
-        val zeroes = ByteArray(4)
-
-        // Header: 18 (byte), hash.size (byte) + hash
-        val header = byteArrayOf(18, hash.size.toByte()) + hash
-        val headerSize = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(header.size).array()
-
-        val innerBox = zeroes + systemId + headerSize + header
-
-        val outerSize = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(innerBox.size + 8).array()
-        val psshTag = "pssh".toByteArray(StandardCharsets.UTF_8)
-
-        val fullBox = outerSize + psshTag + innerBox
-        return Base64.getEncoder().encodeToString(fullBox)
+        val challengeUrl = "$apiUrl/api/v2/books/$chapterId?is_datasaver=$isDataSaver"
+        return executeWithCloudflareCheck(
+            url = challengeUrl,
+            block = { webClient.httpPost(challengeUrl.toHttpUrl(), JSONObject(), headers) },
+            parse = { it.parseJson() },
+        )
     }
 
     private fun String.toChapterNumberOrNull(): Float? = trim()
         .replace(',', '.')
         .toFloatOrNull()
 
-    private fun Any?.toPageFileId(): String = when (this) {
-        is String -> toFileNamePart()
-        is JSONObject -> optFirstString(
-            "pageUuid",
-            "page_uuid",
-            "pageId",
-            "page_id",
-            "fileId",
-            "file_id",
-            "fileName",
-            "file_name",
-            "filename",
-            "name",
-            "id",
-            "path",
-            "url",
-        ).toFileNamePart()
-        else -> ""
-    }
-
-    private fun JSONObject.optFirstString(vararg keys: String): String {
-        for (key in keys) {
-            val value = optString(key).trim()
-            if (value.isNotEmpty()) return value
+    private fun getIntegrityTokenBlocking(): String {
+        if (isIntegrityTokenValid) {
+            return integrityToken
         }
-        return ""
+        val headers = getRequestHeaders().newBuilder()
+            .add("Origin", "https://$domain")
+            .add("Referer", "https://$domain/")
+            .build()
+        val request = Request.Builder()
+            .url(urlBuilder().addPathSegments("api/integrity").build())
+            .post(JSONObject().toString().toRequestBody("application/json".toMediaType()))
+            .headers(headers)
+            .build()
+        context.httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Integrity token request failed ${response.code}")
+            }
+            val json = JSONObject(response.body?.string() ?: "")
+            val token = json.optString("token")
+            if (token.isBlank()) {
+                throw IOException("Failed to retrieve integrity token")
+            }
+            integrityToken = token
+            integrityTokenExp = json.optLong("exp", 0L) * 1000L
+        }
+        return integrityToken
     }
 
-    private fun String.toFileNamePart(): String = substringBefore('?').substringAfterLast('/').trim()
-
-    private operator fun ByteArray.plus(other: ByteArray): ByteArray {
-        val result = ByteArray(this.size + other.size)
-        System.arraycopy(this, 0, result, 0, this.size)
-        System.arraycopy(other, 0, result, this.size, other.size)
-        return result
+    private fun refreshAccessTokenBlocking(chapterId: String) {
+        val integrityToken = getIntegrityTokenBlocking()
+        val headers = getRequestHeaders().newBuilder()
+            .add("Origin", "https://$domain")
+            .add("Referer", "https://$domain/")
+            .add("x-integrity-token", integrityToken)
+            .build()
+        val challengeUrl = "$apiUrl/api/v2/books/$chapterId?is_datasaver=$isDataSaver".toHttpUrl()
+        val request = Request.Builder()
+            .url(challengeUrl)
+            .post(JSONObject().toString().toRequestBody("application/json".toMediaType()))
+            .headers(headers)
+            .build()
+        context.httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Challenge refresh failed ${response.code}")
+            }
+            val json = JSONObject(response.body?.string() ?: "")
+            accessToken = json.optString("access_token").ifBlank {
+                json.optString("accessToken")
+            }.ifBlank {
+                throw IOException("Invalid challenge response: missing access token")
+            }
+            cacheUrl = json.optString("cache_url").ifBlank {
+                json.optString("cacheUrl")
+            }.ifBlank {
+                throw IOException("Invalid challenge response: missing cache url")
+            }
+        }
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val host = request.url.host
+        val url = request.url
+        val host = url.host
+        var requestBuilder = request.newBuilder()
+            .removeHeader("Content-Encoding")
+            .removeHeader("cf-connecting-ip")
         if (host == domain || host.endsWith(".$domain")) {
-            val newRequest = request.newBuilder()
+            requestBuilder = requestBuilder
                 .header("Origin", "https://$domain")
                 .header("Referer", "https://$domain/")
-                .build()
-            return chain.proceed(newRequest)
         }
-        return chain.proceed(request)
-    }
+        val newRequest = requestBuilder.build()
 
-    // Decryption helpers
+        var response = chain.proceed(newRequest)
 
-    private data class WordArray(val words: IntArray, val sigBytes: Int)
-
-    private fun wordArrayToBytes(e: WordArray): ByteArray {
-        val result = ByteArray(e.sigBytes)
-        for (i in 0 until e.sigBytes) {
-            val word = e.words[i ushr 2]
-            val shift = 24 - (i % 4) * 8
-            result[i] = ((word ushr shift) and 0xFF).toByte()
-        }
-        return result
-    }
-
-    private fun aesGcmDecrypt(keyWordArray: WordArray, ivWordArray: WordArray, cipherWordArray: WordArray): ByteArray? {
-        return try {
-            val keyBytes = wordArrayToBytes(keyWordArray)
-            val iv = wordArrayToBytes(ivWordArray)
-            val cipherBytes = wordArrayToBytes(cipherWordArray)
-
-            val secretKey: SecretKey = SecretKeySpec(keyBytes, "AES")
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val spec = GCMParameterSpec(128, iv)
-
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
-            cipher.doFinal(cipherBytes)
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun toWordArray(bytes: ByteArray): WordArray {
-        val words = IntArray((bytes.size + 3) / 4)
-        for (i in bytes.indices) {
-            val wordIndex = i / 4
-            val shift = 24 - (i % 4) * 8
-            words[wordIndex] = words[wordIndex] or ((bytes[i].toInt() and 0xFF) shl shift)
-        }
-        return WordArray(words, bytes.size)
-    }
-
-    private fun decryptImage(payload: ByteArray, keyPart1: String, keyPart2: String): ByteArray? {
-        return try {
-            if (payload.size < 140) return null
-
-            val iv = payload.sliceArray(128 until 140)
-            val ciphertext = payload.sliceArray(140 until payload.size)
-
-            val keyHash = "$keyPart1:$keyPart2".sha256()
-
-            val keyWA = toWordArray(keyHash)
-            val ivWA = toWordArray(iv)
-            val cipherWA = toWordArray(ciphertext)
-
-            aesGcmDecrypt(keyWA, ivWA, cipherWA)
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun processData(input: ByteArray, index: Int, seriesId: String, chapterId: String): ByteArray? {
-        fun isValidImage(data: ByteArray): Boolean {
-            return when {
-                // JPEG
-                data.size >= 2 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() -> true
-                // GIF
-                data.size >= 6 && (
-                    data.copyOfRange(0, 6).contentEquals("GIF87a".toByteArray()) ||
-                        data.copyOfRange(0, 6).contentEquals("GIF89a".toByteArray())
-                    ) -> true
-                // PNG
-                data.size >= 8 && data.copyOfRange(0, 8).contentEquals(
-                    byteArrayOf(
-                        0x89.toByte(),
-                        'P'.code.toByte(),
-                        'N'.code.toByte(),
-                        'G'.code.toByte(),
-                        0x0D, 0x0A, 0x1A, 0x0A,
-                    )
-                ) -> true
-                // WEBP
-                data.size >= 12 && data[0] == 'R'.code.toByte() && data[1] == 'I'.code.toByte() &&
-                    data[2] == 'F'.code.toByte() && data[3] == 'F'.code.toByte() &&
-                    data[8] == 'W'.code.toByte() && data[9] == 'E'.code.toByte() &&
-                    data[10] == 'B'.code.toByte() && data[11] == 'P'.code.toByte() -> true
-                // HEIF
-                data.size >= 12 && data.copyOfRange(4, 8).contentEquals("ftyp".toByteArray()) -> {
-                    val type = data.copyOfRange(8, 11)
-                    type.contentEquals("hei".toByteArray()) ||
-                        type.contentEquals("hev".toByteArray()) ||
-                        type.contentEquals("avi".toByteArray())
-                }
-                // JXL
-                data.size >= 2 && data[0] == 0xFF.toByte() && data[1] == 0x0A.toByte() -> true
-                data.size >= 12 && data.copyOfRange(0, 8).contentEquals(
-                    byteArrayOf(
-                        0,
-                        0,
-                        0,
-                        12,
-                        'J'.code.toByte(),
-                        'X'.code.toByte(),
-                        'L'.code.toByte(),
-                        ' '.code.toByte(),
-                    ),
-                ) -> true
-                else -> false
-            }
-        }
-
-        try {
-            var processed: ByteArray = input
-
-            if (!isValidImage(processed)) {
-                val seed = generateSeed(seriesId, chapterId, "%04d.jpg".format(index))
-                val scrambler = Scrambler(seed, 10)
-                val scrambleMapping = scrambler.getScrambleMapping()
-                processed = unscramble(processed, scrambleMapping, true)
-                if (!isValidImage(processed)) return null
-            }
-
-            return processed
-        } catch (_: Exception) {
-            return null
-        }
-    }
-
-    private fun generateSeed(t: String, n: String, e: String): BigInteger {
-        val sha256 = "$t:$n:$e".sha256()
-        var a = BigInteger.ZERO
-        for (i in 0 until 8) {
-            a = a.shiftLeft(8).or(BigInteger.valueOf((sha256[i].toInt() and 0xFF).toLong()))
-        }
-        return a
-    }
-
-    private fun unscramble(data: ByteArray, mapping: List<Pair<Int, Int>>, n: Boolean): ByteArray {
-        val s = mapping.size
-        val a = data.size
-        val l = a / s
-        val o = a % s
-
-        val (r, i) = if (n) {
-            if (o > 0) {
-                Pair(data.copyOfRange(0, o), data.copyOfRange(o, a))
-            } else {
-                Pair(ByteArray(0), data)
-            }
-        } else {
-            if (o > 0) {
-                Pair(data.copyOfRange(a - o, a), data.copyOfRange(0, a - o))
-            } else {
-                Pair(ByteArray(0), data)
-            }
-        }
-
-        val chunks = (0 until s).map {
-            val start = it * l
-            val end = (it + 1) * l
-            i.copyOfRange(start, end)
-        }.toMutableList()
-
-        val u = Array(s) { ByteArray(0) }
-
-        if (n) {
-            for ((e, m) in mapping) {
-                if (e < s && m < s) {
-                    u[e] = chunks[m]
-                }
-            }
-        } else {
-            for ((e, m) in mapping) {
-                if (e < s && m < s) {
-                    u[m] = chunks[e]
+        if (url.queryParameterNames.contains("token") &&
+            (response.code == 401 || response.code == 403 || response.code == 507)
+        ) {
+            response.close()
+            val segments = url.pathSegments
+            val chapterId = segments.getOrNull(4)
+            if (chapterId != null) {
+                runCatching { refreshAccessTokenBlocking(chapterId) }.onSuccess {
+                    val retryRequest = newRequest.newBuilder()
+                        .url(url.newBuilder().setQueryParameter("token", accessToken).build())
+                        .build()
+                    response = chain.proceed(retryRequest)
                 }
             }
         }
-
-        val h = u.fold(ByteArray(0)) { acc, chunk -> acc + chunk }
-
-        return if (n) {
-            h + r
-        } else {
-            r + h
-        }
+        return response
     }
 
-    private class Scrambler(private val seed: BigInteger, private val gridSize: Int) {
-        private val totalPieces: Int = gridSize * gridSize
-        private val randomizer: Randomizer = Randomizer(seed, gridSize)
-        private val dependencyGraph: DependencyGraph
-        private val scramblePath: List<Int>
+     companion object {
+        private const val CLOUDFLARE_RETRY_DELAY_MS = 6_000L
 
-        init {
-            dependencyGraph = buildDependencyGraph()
-            scramblePath = generateScramblePath()
-        }
-
-        private data class DependencyGraph(
-            val graph: MutableMap<Int, MutableList<Int>>,
-            val inDegree: MutableMap<Int, Int>,
+        private val UUID_REGEX = Regex(
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
         )
 
-        private fun buildDependencyGraph(): DependencyGraph {
-            val graph = mutableMapOf<Int, MutableList<Int>>()
-            val inDegree = mutableMapOf<Int, Int>()
+        private val KAGANE_LANGS: Set<Locale> = setOf(
+            Locale("af"),
+            Locale("ar"),
+            Locale("az"),
+            Locale("be"),
+            Locale("bg"),
+            Locale("bn"),
+            Locale("ca"),
+            Locale("cs"),
+            Locale("cv"),
+            Locale("da"),
+            Locale.GERMAN,
+            Locale("el"),
+            Locale.ENGLISH,
+            Locale("eo"),
+            Locale("es"),
+            Locale("es","419"),
+            Locale("et"),
+            Locale("eu"),
+            Locale("fa"),
+            Locale("fi"),
+            Locale("fil"),
+            Locale.FRENCH,
+            Locale("ga"),
+            Locale("he"),
+            Locale("hi"),
+            Locale("hr"),
+            Locale("hu"),
+            Locale("id"),
+            Locale.ITALIAN,
+            Locale.JAPANESE,
+            Locale("jv"),
+            Locale("ka"),
+            Locale("kk"),
+            Locale.KOREAN,
+            Locale("la"),
+            Locale("lt"),
+            Locale("mn"),
+            Locale("ms"),
+            Locale("my"),
+            Locale("ne"),
+            Locale("nl"),
+            Locale("no"),
+            Locale("pl"),
+            Locale("pt"),
+            Locale("pt", "br"),
+            Locale("ro"),
+            Locale("ru"),
+            Locale("sk"),
+            Locale("sl"),
+            Locale("sq"),
+            Locale("sr"),
+            Locale("sv"),
+            Locale("ta"),
+            Locale("te"),
+            Locale("th"),
+            Locale("tr"),
+            Locale("uk"),
+            Locale("ur"),
+            Locale("uz"),
+            Locale("vi"),
+            Locale.SIMPLIFIED_CHINESE,
+            Locale.TRADITIONAL_CHINESE,
+        )
 
-            for (n in 0 until totalPieces) {
-                inDegree[n] = 0
-                graph[n] = mutableListOf()
-            }
+        private fun JSONObject.optGenreId(): String = optString("genre_id").ifBlank { optString("id") }
 
-            val rng = Randomizer(seed, gridSize)
-
-            for (r in 0 until totalPieces) {
-                val i = (rng.prng() % BigInteger.valueOf(3) + BigInteger.valueOf(2)).toInt()
-                repeat(i) {
-                    val j = (rng.prng() % BigInteger.valueOf(totalPieces.toLong())).toInt()
-                    if (j != r && !wouldCreateCycle(graph, j, r)) {
-                        graph[j]!!.add(r)
-                        inDegree[r] = inDegree[r]!! + 1
-                    }
-                }
-            }
-
-            for (r in 0 until totalPieces) {
-                if (inDegree[r] == 0) {
-                    var tries = 0
-                    while (tries < 10) {
-                        val s = (rng.prng() % BigInteger.valueOf(totalPieces.toLong())).toInt()
-                        if (s != r && !wouldCreateCycle(graph, s, r)) {
-                            graph[s]!!.add(r)
-                            inDegree[r] = inDegree[r]!! + 1
-                            break
-                        }
-                        tries++
-                    }
-                }
-            }
-
-            return DependencyGraph(graph, inDegree)
-        }
-
-        private fun wouldCreateCycle(graph: Map<Int, List<Int>>, target: Int, start: Int): Boolean {
-            val visited = mutableSetOf<Int>()
-            val stack = ArrayDeque<Int>()
-            stack.add(start)
-
-            while (stack.isNotEmpty()) {
-                val n = stack.removeLast()
-                if (n == target) return true
-                if (!visited.add(n)) continue
-                graph[n]?.let { stack.addAll(it) }
-            }
-            return false
-        }
-
-        private fun generateScramblePath(): List<Int> {
-            val graphCopy = dependencyGraph.graph.mapValues { it.value.toMutableList() }.toMutableMap()
-            val inDegreeCopy = dependencyGraph.inDegree.toMutableMap()
-
-            val queue = ArrayDeque<Int>()
-            for (n in 0 until totalPieces) {
-                if (inDegreeCopy[n] == 0) {
-                    queue.add(n)
-                }
-            }
-
-            val order = mutableListOf<Int>()
-            while (queue.isNotEmpty()) {
-                val i = queue.removeFirst()
-                order.add(i)
-                val neighbors = graphCopy[i]
-                if (neighbors != null) {
-                    for (e in neighbors) {
-                        inDegreeCopy[e] = inDegreeCopy[e]!! - 1
-                        if (inDegreeCopy[e] == 0) {
-                            queue.add(e)
-                        }
-                    }
-                }
-            }
-            return order
-        }
-
-        fun getScrambleMapping(): List<Pair<Int, Int>> {
-            var e = randomizer.order.toMutableList()
-
-            if (scramblePath.size == totalPieces) {
-                val t = Array(totalPieces) { 0 }
-                for (i in scramblePath.indices) {
-                    t[i] = scramblePath[i]
-                }
-                val n = Array(totalPieces) { 0 }
-                for (r in 0 until totalPieces) {
-                    n[r] = e[t[r]]
-                }
-                e = n.toMutableList()
-            }
-
-            val result = mutableListOf<Pair<Int, Int>>()
-            for (n in 0 until totalPieces) {
-                result.add(n to e[n])
-            }
-            return result
-        }
-    }
-
-    private class Randomizer(seedInput: BigInteger, t: Int) {
-        val size: Int = t * t
-        val seed: BigInteger
-        private var state: BigInteger
-        private val entropyPool: ByteArray
-        val order: MutableList<Int>
-
-        companion object {
-            private val MASK64 = BigInteger("FFFFFFFFFFFFFFFF", 16)
-            private val MASK32 = BigInteger("FFFFFFFF", 16)
-            private val MASK8 = BigInteger("FF", 16)
-            private val PRNG_MULT = BigInteger("27BB2EE687B0B0FD", 16)
-            private val RND_MULT_32 = BigInteger("45d9f3b", 16)
-        }
-
-        init {
-            val seedMask = BigInteger("FFFFFFFFFFFFFFFF", 16)
-            seed = seedInput.and(seedMask)
-            state = hashSeed(seed)
-            entropyPool = expandEntropy(seed)
-            order = MutableList(size) { it }
-            permute()
-        }
-
-        private fun hashSeed(e: BigInteger): BigInteger {
-            val md = e.toString().sha256()
-            return readBigUInt64BE(md, 0).xor(readBigUInt64BE(md, 8))
-        }
-
-        private fun readBigUInt64BE(bytes: ByteArray, offset: Int): BigInteger {
-            var n = BigInteger.ZERO
-            for (i in 0 until 8) {
-                n = n.shiftLeft(8).or(BigInteger.valueOf((bytes[offset + i].toInt() and 0xFF).toLong()))
-            }
-            return n
-        }
-
-        private fun expandEntropy(e: BigInteger): ByteArray =
-            MessageDigest.getInstance("SHA-512").digest(e.toString().toByteArray(StandardCharsets.UTF_8))
-
-        private fun sbox(e: Int): Int {
-            val t = intArrayOf(163, 95, 137, 13, 55, 193, 107, 228, 114, 185, 22, 243, 68, 218, 158, 40)
-            return t[e and 15] xor t[e shr 4 and 15]
-        }
-
-        fun prng(): BigInteger {
-            state = state.xor(state.shiftLeft(11).and(MASK64))
-            state = state.xor(state.shiftRight(19))
-            state = state.xor(state.shiftLeft(7).and(MASK64))
-            state = state.multiply(PRNG_MULT).and(MASK64)
-            return state
-        }
-
-        private fun roundFunc(e: BigInteger, t: Int): BigInteger {
-            var n = e.xor(prng()).xor(BigInteger.valueOf(t.toLong()))
-
-            val rot = n.shiftLeft(5).or(n.shiftRight(3)).and(MASK32)
-            n = rot.multiply(RND_MULT_32).and(MASK32)
-
-            val sboxVal = sbox(n.and(MASK8).toInt())
-            n = n.xor(BigInteger.valueOf(sboxVal.toLong()))
-
-            n = n.xor(n.shiftRight(13))
-            return n
-        }
-
-        private fun feistelMix(e: Int, t: Int, rounds: Int): Pair<BigInteger, BigInteger> {
-            var r = BigInteger.valueOf(e.toLong())
-            var i = BigInteger.valueOf(t.toLong())
-            for (round in 0 until rounds) {
-                val ent = entropyPool[round % entropyPool.size].toInt() and 0xFF
-                r = r.xor(roundFunc(i, ent))
-                val secondArg = ent xor (round * 31 and 255)
-                i = i.xor(roundFunc(r, secondArg))
-            }
-            return Pair(r, i)
-        }
-
-        private fun permute() {
-            val half = size / 2
-            val sizeBig = BigInteger.valueOf(size.toLong())
-
-            for (t in 0 until half) {
-                val n = t + half
-                val (rBig, iBig) = feistelMix(t, n, 4)
-                val s = rBig.mod(sizeBig).toInt()
-                val a = iBig.mod(sizeBig).toInt()
-                val tmp = order[s]
-                order[s] = order[a]
-                order[a] = tmp
-            }
-
-            for (e in size - 1 downTo 1) {
-                val ent = entropyPool[e % entropyPool.size].toInt() and 0xFF
-                val idxBig = prng().add(BigInteger.valueOf(ent.toLong())).mod(BigInteger.valueOf((e + 1).toLong()))
-                val n = idxBig.toInt()
-                val tmp = order[e]
-                order[e] = order[n]
-                order[n] = tmp
-            }
-        }
-    }
-}
-
-private fun String.sha256(): ByteArray =
-    MessageDigest.getInstance("SHA-256").digest(this.toByteArray(StandardCharsets.UTF_8))
-
-private class Scrambler(private val seed: BigInteger, private val gridSize: Int) {
-    private val totalPieces: Int = gridSize * gridSize
-    private val randomizer: Randomizer = Randomizer(seed, gridSize)
-    private val dependencyGraph: DependencyGraph
-    private val scramblePath: List<Int>
-
-    init {
-        dependencyGraph = buildDependencyGraph()
-        scramblePath = generateScramblePath()
-    }
-
-    private data class DependencyGraph(
-        val graph: MutableMap<Int, MutableList<Int>>,
-        val inDegree: MutableMap<Int, Int>,
-    )
-
-    private fun buildDependencyGraph(): DependencyGraph {
-        val graph = mutableMapOf<Int, MutableList<Int>>()
-        val inDegree = mutableMapOf<Int, Int>()
-
-        for (n in 0 until totalPieces) {
-            inDegree[n] = 0
-            graph[n] = mutableListOf()
-        }
-
-        val rng = Randomizer(seed, gridSize)
-
-        for (r in 0 until totalPieces) {
-            val i = (rng.prng() % BigInteger.valueOf(3) + BigInteger.valueOf(2)).toInt()
-            repeat(i) {
-                val j = (rng.prng() % BigInteger.valueOf(totalPieces.toLong())).toInt()
-                if (j != r && !wouldCreateCycle(graph, j, r)) {
-                    graph[j]!!.add(r)
-                    inDegree[r] = inDegree[r]!! + 1
-                }
-            }
-        }
-
-        for (r in 0 until totalPieces) {
-            if (inDegree[r] == 0) {
-                var tries = 0
-                while (tries < 10) {
-                    val s = (rng.prng() % BigInteger.valueOf(totalPieces.toLong())).toInt()
-                    if (s != r && !wouldCreateCycle(graph, s, r)) {
-                        graph[s]!!.add(r)
-                        inDegree[r] = inDegree[r]!! + 1
-                        break
-                    }
-                    tries++
-                }
-            }
-        }
-
-        return DependencyGraph(graph, inDegree)
-    }
-
-    private fun wouldCreateCycle(graph: Map<Int, List<Int>>, target: Int, start: Int): Boolean {
-        val visited = mutableSetOf<Int>()
-        val stack = ArrayDeque<Int>()
-        stack.add(start)
-
-        while (stack.isNotEmpty()) {
-            val n = stack.removeLast()
-            if (n == target) return true
-            if (!visited.add(n)) continue
-            graph[n]?.let { stack.addAll(it) }
-        }
-        return false
-    }
-
-    private fun generateScramblePath(): List<Int> {
-        val graphCopy = dependencyGraph.graph.mapValues { it.value.toMutableList() }.toMutableMap()
-        val inDegreeCopy = dependencyGraph.inDegree.toMutableMap()
-
-        val queue = ArrayDeque<Int>()
-        for (n in 0 until totalPieces) {
-            if (inDegreeCopy[n] == 0) {
-                queue.add(n)
-            }
-        }
-
-        val order = mutableListOf<Int>()
-        while (queue.isNotEmpty()) {
-            val i = queue.removeFirst()
-            order.add(i)
-            val neighbors = graphCopy[i]
-            if (neighbors != null) {
-                for (e in neighbors) {
-                    inDegreeCopy[e] = inDegreeCopy[e]!! - 1
-                    if (inDegreeCopy[e] == 0) {
-                        queue.add(e)
-                    }
-                }
-            }
-        }
-        return order
-    }
-
-    fun getScrambleMapping(): List<Pair<Int, Int>> {
-        var e = randomizer.order.toMutableList()
-
-        if (scramblePath.size == totalPieces) {
-            val t = Array(totalPieces) { 0 }
-            for (i in scramblePath.indices) {
-                t[i] = scramblePath[i]
-            }
-            val n = Array(totalPieces) { 0 }
-            for (r in 0 until totalPieces) {
-                n[r] = e[t[r]]
-            }
-            e = n.toMutableList()
-        }
-
-        val result = mutableListOf<Pair<Int, Int>>()
-        for (n in 0 until totalPieces) {
-            result.add(n to e[n])
-        }
-        return result
-    }
-}
-
-private class Randomizer(seedInput: BigInteger, t: Int) {
-    val size: Int = t * t
-    val seed: BigInteger
-    private var state: BigInteger
-    private val entropyPool: ByteArray
-    val order: MutableList<Int>
-
-    companion object {
-        private val MASK64 = BigInteger("FFFFFFFFFFFFFFFF", 16)
-        private val MASK32 = BigInteger("FFFFFFFF", 16)
-        private val MASK8 = BigInteger("FF", 16)
-        private val PRNG_MULT = BigInteger("27BB2EE687B0B0FD", 16)
-        private val RND_MULT_32 = BigInteger("45d9f3b", 16)
-    }
-
-    init {
-        val seedMask = BigInteger("FFFFFFFFFFFFFFFF", 16)
-        seed = seedInput.and(seedMask)
-        state = hashSeed(seed)
-        entropyPool = expandEntropy(seed)
-        order = MutableList(size) { it }
-        permute()
-    }
-
-    private fun hashSeed(e: BigInteger): BigInteger {
-        val md = e.toString().sha256()
-        return readBigUInt64BE(md, 0).xor(readBigUInt64BE(md, 8))
-    }
-
-    private fun readBigUInt64BE(bytes: ByteArray, offset: Int): BigInteger {
-        var n = BigInteger.ZERO
-        for (i in 0 until 8) {
-            n = n.shiftLeft(8).or(BigInteger.valueOf((bytes[offset + i].toInt() and 0xFF).toLong()))
-        }
-        return n
-    }
-
-    private fun expandEntropy(e: BigInteger): ByteArray =
-        MessageDigest.getInstance("SHA-512").digest(e.toString().toByteArray(StandardCharsets.UTF_8))
-
-    private fun sbox(e: Int): Int {
-        val t = intArrayOf(163, 95, 137, 13, 55, 193, 107, 228, 114, 185, 22, 243, 68, 218, 158, 40)
-        return t[e and 15] xor t[e shr 4 and 15]
-    }
-
-    fun prng(): BigInteger {
-        state = state.xor(state.shiftLeft(11).and(MASK64))
-        state = state.xor(state.shiftRight(19))
-        state = state.xor(state.shiftLeft(7).and(MASK64))
-        state = state.multiply(PRNG_MULT).and(MASK64)
-        return state
-    }
-
-    private fun roundFunc(e: BigInteger, t: Int): BigInteger {
-        var n = e.xor(prng()).xor(BigInteger.valueOf(t.toLong()))
-
-        val rot = n.shiftLeft(5).or(n.shiftRight(3)).and(MASK32)
-        n = rot.multiply(RND_MULT_32).and(MASK32)
-
-        val sboxVal = sbox(n.and(MASK8).toInt())
-        n = n.xor(BigInteger.valueOf(sboxVal.toLong()))
-
-        n = n.xor(n.shiftRight(13))
-        return n
-    }
-
-    private fun feistelMix(e: Int, t: Int, rounds: Int): Pair<BigInteger, BigInteger> {
-        var r = BigInteger.valueOf(e.toLong())
-        var i = BigInteger.valueOf(t.toLong())
-        for (round in 0 until rounds) {
-            val ent = entropyPool[round % entropyPool.size].toInt() and 0xFF
-            r = r.xor(roundFunc(i, ent))
-            val secondArg = ent xor (round * 31 and 255)
-            i = i.xor(roundFunc(r, secondArg))
-        }
-        return Pair(r, i)
-    }
-
-    private fun permute() {
-        val half = size / 2
-        val sizeBig = BigInteger.valueOf(size.toLong())
-
-        for (t in 0 until half) {
-            val n = t + half
-            val (rBig, iBig) = feistelMix(t, n, 4)
-            val s = rBig.mod(sizeBig).toInt()
-            val a = iBig.mod(sizeBig).toInt()
-            val tmp = order[s]
-            order[s] = order[a]
-            order[a] = tmp
-        }
-
-        for (e in size - 1 downTo 1) {
-            val ent = entropyPool[e % entropyPool.size].toInt() and 0xFF
-            val idxBig = prng().add(BigInteger.valueOf(ent.toLong())).mod(BigInteger.valueOf((e + 1).toLong()))
-            val n = idxBig.toInt()
-            val tmp = order[e]
-            order[e] = order[n]
-            order[n] = tmp
-        }
+        private fun JSONObject.optGenreName(): String =
+            optString("genre_name")
+                .ifBlank { optString("genreName") }
+                .ifBlank { optString("name") }
+                .ifBlank { optString("title") }
     }
 }
