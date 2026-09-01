@@ -5,6 +5,7 @@ import okhttp3.HttpUrl
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.api.Tag
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.core.SinglePageMangaParser
 import org.koitharu.kotatsu.parsers.model.*
@@ -18,6 +19,7 @@ import org.koitharu.kotatsu.test_util.*
 import kotlin.time.Duration.Companion.minutes
 
 //@ExtendWith(AuthCheckExtension::class)
+@Tag("live")
 internal class MangaParserTest {
 
 	private val context = MangaLoaderContextMock

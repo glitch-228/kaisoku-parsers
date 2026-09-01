@@ -11,7 +11,20 @@ group = "org.koitharu"
 version = "1.0"
 
 tasks.test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        excludeTags("live")
+    }
+}
+
+tasks.register<Test>("liveTest") {
+    description = "Runs the network-dependent parser matrix"
+    group = "verification"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("live")
+    }
+    shouldRunAfter(tasks.test)
 }
 
 ksp {
