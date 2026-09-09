@@ -18,6 +18,7 @@ import org.koitharu.kotatsu.parsers.model.MangaState
 import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
 import org.koitharu.kotatsu.parsers.model.SortOrder
+import org.koitharu.kotatsu.parsers.model.YEAR_UNKNOWN
 
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.parseJson
@@ -50,6 +51,7 @@ internal class Chikari(context: MangaLoaderContext) :
         isMultipleTagsSupported = true,
         isTagsExclusionSupported = true,
         isSearchWithFiltersSupported = true,
+        isYearSupported = true,
     )
 
     private val tags by lazy {
@@ -72,6 +74,7 @@ internal class Chikari(context: MangaLoaderContext) :
             ContentType.MANHUA,
             ContentType.OTHER, // OEL
         ),
+        availableContentRating = EnumSet.of(ContentRating.SAFE, ContentRating.ADULT),
     )
 
     override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
@@ -114,6 +117,15 @@ internal class Chikari(context: MangaLoaderContext) :
 
             filter.states.firstOrNull()?.let { state ->
                 addQueryParameter("status", state.toQueryParam())
+            }
+
+            addQueryParameter(
+                "adult",
+                (filter.contentRating.firstOrNull() == ContentRating.ADULT).toString(),
+            )
+
+            if (filter.year != YEAR_UNKNOWN) {
+                addQueryParameter("year", filter.year.toString())
             }
         }.build().toString()
     }
