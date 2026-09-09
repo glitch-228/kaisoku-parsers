@@ -33,7 +33,7 @@ internal class ZenMangaParser(context: MangaLoaderContext) :
 		setFirstPage(0)
 	}
 
-	override val configKeyDomain = ConfigKey.Domain("inkstory.me")
+	override val configKeyDomain = ConfigKey.Domain("inkstory.net")
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.POPULARITY,
@@ -54,7 +54,7 @@ internal class ZenMangaParser(context: MangaLoaderContext) :
 	)
 
 	override val authUrl: String
-		get() = "https://sso.inuko.me/account/sign-in"
+		get() = "https://sso.inuko.net/account/sign-in"
 
 	private val apiDomain = if (domain.startsWith("v1.")) domain.replace("v1.", "api.") else "api.$domain"
 
