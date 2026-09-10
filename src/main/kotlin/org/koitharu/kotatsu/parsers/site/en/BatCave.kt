@@ -1,5 +1,6 @@
 package org.koitharu.kotatsu.parsers.site.en
 
+import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.json.JSONObject
@@ -24,6 +25,15 @@ internal class BatCave(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.BATCAVE, 20) {
 
 	override val configKeyDomain = ConfigKey.Domain("batcave.biz")
+
+	// The site answers plain HTTP requests that do not look like a navigation with a JS guard
+	// redirect instead of content; these make the OkHttp path look like a browser visit.
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.set("Sec-Fetch-Dest", "document")
+		.set("Sec-Fetch-Mode", "navigate")
+		.set("Sec-Fetch-Site", "none")
+		.set("Sec-Fetch-User", "?1")
+		.build()
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
