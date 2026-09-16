@@ -245,8 +245,13 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val data = fetchAstroData(manga.url)
+		val initialData = fetchAstroData(manga.url)
 			?: throw ParseException("Не удалось получить Astro JSON для деталей манги", manga.publicUrl)
+
+		val data = if (initialData.containsKey("current-book-chapters")) initialData else {
+			fetchAstroData(manga.url.trimEnd('/') + "/chapters")
+				?: throw ParseException("Cannot load InkStory chapters", manga.publicUrl)
+		}
 
 		val bookData = data["current-book"] as? Map<*, *> ?: return manga
 		val branchesData = data["current-book-branches"] as? List<Map<*, *>> ?: emptyList()
@@ -300,6 +305,7 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		}.reversed()
 
 		return manga.copy(
+			coverUrl = (bookData["poster"] as? String)?.takeIf(String::isNotBlank) ?: manga.coverUrl,
 			description = description,
 			tags = manga.tags + tags,
 			authors = authors,
@@ -435,6 +441,7 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		}
 
 		val responseHtml = response.parseHtml()
+		parseInkStoryState(context, responseHtml, fullUrl)?.let { return it }
 		val scriptElement = responseHtml.getElementById("it-astro-state")
 			?: throw ParseException("Не удалось найти <script id='it-astro-state'> на странице $fullUrl.", fullUrl)
 

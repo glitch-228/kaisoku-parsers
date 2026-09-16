@@ -24,6 +24,31 @@ import org.koitharu.kotatsu.parsers.model.SortOrder
 
 internal class ReadmangaParserTest {
 
+    @Test fun `missing cover container and image do not hide manga`() = runTest {
+        val context = ReadmangaContext(domain = "a.zazaza.me", noCover = true)
+        context.parser = ReadmangaParser(context)
+        val manga = context.parser.getList(0, SortOrder.RELEVANCE, MangaListFilter(query = "demo")).single()
+        org.junit.jupiter.api.Assertions.assertNull(manga.coverUrl)
+        val details = context.parser.getDetails(manga)
+        assertEquals("Current description", details.description)
+        org.junit.jupiter.api.Assertions.assertNotNull(details.chapters)
+        org.junit.jupiter.api.Assertions.assertNull(details.coverUrl)
+    }
+
+
+	@Test
+	fun `current hero markup retains metadata and cover for catalog and saved manga`() = runTest {
+		val context = ReadmangaContext(domain = "a.zazaza.me")
+		context.parser = ReadmangaParser(context)
+		val catalog = context.parser.getList(0, SortOrder.RELEVANCE, MangaListFilter(query = "demo")).single()
+		for (seed in listOf(catalog, catalog.copy(description = "Saved description"))) {
+			val details = context.parser.getDetails(seed)
+			assertEquals("Current description", details.description)
+			assertEquals("https://rm.one-way.work/current.webp", details.largeCoverUrl)
+			assertEquals(seed.id, details.id)
+		}
+	}
+
 	@Test
 	fun `query-only search does not request obsolete advanced filter form`() = runTest {
 		val context = ReadmangaContext(domain = "a.zazaza.me")
@@ -54,6 +79,7 @@ internal class ReadmangaParserTest {
 
 	private class ReadmangaContext(
 		private val domain: String? = null,
+        private val noCover: Boolean = false,
 	) : MangaLoaderContext() {
 
 		lateinit var parser: ReadmangaParser
@@ -63,7 +89,7 @@ internal class ReadmangaParserTest {
 
 		override val httpClient: OkHttpClient = OkHttpClient.Builder()
 			.addInterceptor { chain -> parser.intercept(chain) }
-			.addInterceptor(ReadmangaInterceptor(requestedUrls))
+			.addInterceptor(ReadmangaInterceptor(requestedUrls, noCover))
 			.build()
 
 		override fun getConfig(source: MangaSource): MangaSourceConfig {
@@ -102,17 +128,25 @@ internal class ReadmangaParserTest {
 
 	private class ReadmangaInterceptor(
 		private val requestedUrls: MutableList<String>,
+        private val noCover: Boolean,
 	) : Interceptor {
 
 		override fun intercept(chain: Interceptor.Chain): Response {
 			val request = chain.request()
 			requestedUrls += request.url.toString()
-			val body = when (request.url.encodedPath) {
+			var body = when (request.url.encodedPath) {
+				"/demo-manga" -> """
+					<div id="mangaBox"><meta itemprop="name" content="Demo Manga">
+					<div class="cr-hero"><img class="cr-hero-poster__img" src="https://rm.one-way.work/current.webp"></div>
+					<div class="cr-description__content" itemprop="description">Current description</div>
+					<div id="chapters-list"></div></div>
+				""".trimIndent()
 				"/search/advancedResults" -> SEARCH_HTML
 				"/search/advanced" -> error("Query-only search must not request the advanced filter form")
 				else -> return response(request, code = 404, body = "Not found")
 			}
-			return response(request, code = 200, body = body)
+			if (noCover) body = org.jsoup.Jsoup.parse(body).apply { select("div.img, img").remove() }.outerHtml()
+            return response(request, code = 200, body = body)
 		}
 
 		private fun response(request: Request, code: Int, body: String): Response {

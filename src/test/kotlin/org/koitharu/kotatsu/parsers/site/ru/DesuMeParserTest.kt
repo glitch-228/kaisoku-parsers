@@ -18,12 +18,35 @@ import org.koitharu.kotatsu.parsers.SourceConfigMock
 import org.koitharu.kotatsu.parsers.bitmap.Bitmap
 import org.koitharu.kotatsu.parsers.config.MangaSourceConfig
 import org.koitharu.kotatsu.parsers.model.MangaChapter
+import org.koitharu.kotatsu.parsers.model.MangaListFilter
+import org.koitharu.kotatsu.parsers.model.SortOrder
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.test_util.mangaOf
 
 internal class DesuMeParserTest {
+
+    @Test
+    fun `current search cards keep titles covers and stable identity`() = runTest {
+        val parser = DesuMeParser(DesuContext())
+        val manga = parser.getList(0, SortOrder.UPDATED, MangaListFilter(query = "Homeless")).single()
+        assertEquals("Бездомный", manga.title)
+        assertEquals(setOf("Homeless"), manga.altTitles)
+        assertEquals(parser.generateUid(6294L), manga.id)
+        assertEquals("https://static.desu.uno/data/manga/covers/x120/6294.jpg", manga.coverUrl)
+    }
+
+    @Test
+    fun `details use poster instead of social card and keep genre title and key separate`() = runTest {
+        val parser = DesuMeParser(DesuContext())
+        val manga = mangaOf(parser.source, "/manga/homeless.6294/")
+        val details = parser.getDetails(manga)
+        assertEquals("https://static.desu.uno/data/manga/covers/preview/6294.jpg", details.largeCoverUrl)
+        assertEquals("Школа", details.tags.single().title)
+        assertEquals("60-School", details.tags.single().key)
+        assertEquals(manga.id, details.id)
+    }
 
     @Test
     fun migrateLegacyApiMangaUrl() = runTest {
@@ -108,6 +131,8 @@ internal class DesuMeParserTest {
             val url = request.url
             requestedUrls += url.toString()
             val body = when (url.encodedPath) {
+                "/manga/search/" -> SEARCH_HTML
+                "/manga/homeless.6294/" -> DETAILS_HTML
                 "/manga/iron-ladies.1883/vol11/ch510/rus" -> CHAPTER_HTML
                 "/api/manga/1883/chapters/691212" -> PAGES_JSON
                 else -> error("Unexpected request: $url")
@@ -123,6 +148,21 @@ internal class DesuMeParserTest {
     }
 
     private companion object {
+        // Reduced from live desu.uno responses, 2026-09-15.
+        private const val SEARCH_HTML = """
+            <base href="https://desu.uno/">
+            <li class="AniMangaSearchCard"><a class="AniMangaSearchCard__link" href="manga/homeless.6294/">
+            <img class="AniMangaSearchCard__cover" src="https://static.desu.uno/data/manga/covers/x120/6294.jpg">
+            <span class="AniMangaSearchCard__title">Бездомный</span>
+            <span class="AniMangaSearchCard__subtitle">Homeless</span></a></li>
+        """
+        private const val DETAILS_HTML = """
+            <base href="https://desu.uno/">
+            <meta property="og:image" content="https://static.desu.uno/data/manga/covers/snippet/6294.jpg">
+            <div id="animeView"><link itemprop="url" href="https://desu.uno/manga/homeless.6294/">
+            <div class="c-poster"><img itemprop="image" src="https://static.desu.uno/data/manga/covers/preview/6294.jpg"></div>
+            <div class="b-entry-info"><a itemprop="genre" href="manga/?genres=60-School">Школа</a></div></div>
+        """
         private const val CHAPTER_HTML = """
             <html>
                 <head>

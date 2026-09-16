@@ -202,7 +202,8 @@ internal abstract class LibSocialParser(
 				val id = it.getIntOrDefault("id", -1)
 				if (id >= 4) ContentRating.SUGGESTIVE else sourceContentRating
 			} ?: manga.contentRating,
-			description = parseSummary(json.getString("summary")),
+			description = json.opt("summary")?.takeUnless { it == JSONObject.NULL }
+				?.let { parseSummary(it.toString()) } ?: manga.description,
 			chapters = chapters,
 		)
 	}
@@ -298,8 +299,7 @@ internal abstract class LibSocialParser(
 	}
 
 	private fun parseManga(jo: JSONObject): Manga {
-		val cover = jo.getJSONObject("cover")
-		val isNsfwSource = jo.getJSONObject("ageRestriction").getIntOrDefault("id", 0) >= 3
+		val cover = jo.optJSONObject("cover")
 		return Manga(
 			id = generateUid(jo.getLong("id")),
 			title = jo.getString("rus_name").ifEmpty { jo.getString("name") },
@@ -309,11 +309,11 @@ internal abstract class LibSocialParser(
 			rating = jo.optJSONObject("rating")
 				?.getFloatOrDefault("average", RATING_UNKNOWN * 10f)?.div(10f) ?: RATING_UNKNOWN,
 			contentRating = sourceContentRating,
-			coverUrl = cover.getString("thumbnail"),
+			coverUrl = cover?.getStringOrNull("thumbnail") ?: cover?.getStringOrNull("default"),
 			tags = setOf(),
 			state = statesMap[jo.optJSONObject("status")?.getIntOrDefault("id", -1) ?: -1],
 			authors = emptySet(),
-			largeCoverUrl = cover.getString("default"),
+			largeCoverUrl = cover?.getStringOrNull("default"),
 			source = source,
 		)
 	}

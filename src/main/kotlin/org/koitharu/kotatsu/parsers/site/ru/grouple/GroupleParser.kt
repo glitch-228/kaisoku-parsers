@@ -119,7 +119,7 @@ internal abstract class GroupleParser(
             selectFirst("div.leftContent") ?: this
         }
         val dateFormat = SimpleDateFormat("dd.MM.yy", Locale.US)
-        val coverImg = root.selectFirst("div.subject-cover")?.selectFirst("img")
+        val coverImg = root.selectFirst("div.subject-cover img, img.cr-hero-poster__img[src]")
         val translations = if (config[splitTranslationsKey]) {
             root.selectFirst("div.translator-selection")
                 ?.select(".translator-selection-item")
@@ -192,9 +192,11 @@ internal abstract class GroupleParser(
             } ?: manga.altTitles,
             publicUrl = response.request.url.toString(),
             description = description,
-            largeCoverUrl = coverImg?.attrAsAbsoluteUrlOrNull("data-full"),
+            largeCoverUrl = coverImg?.attrAsAbsoluteUrlOrNull("data-full")
+                ?: coverImg?.attrAsAbsoluteUrlOrNull("src") ?: manga.largeCoverUrl,
             coverUrl = manga.coverUrl
-                ?: coverImg?.attrAsAbsoluteUrlOrNull("data-thumb")?.replace("_p.", "."),
+                ?: coverImg?.attrAsAbsoluteUrlOrNull("data-thumb")?.replace("_p.", ".")
+                ?: coverImg?.attrAsAbsoluteUrlOrNull("src"),
             tags = tags,
             state = if (isRestricted) {
                 MangaState.RESTRICTED
@@ -528,13 +530,15 @@ internal abstract class GroupleParser(
     private fun Response.isPumpkin(): Boolean = request.url.host == "upload.wikimedia.org"
 
     private fun parseManga(node: Element): Manga? {
-        val imgDiv = node.selectFirst("div.img") ?: return null
+        val imgDiv = node.selectFirst("div.img")
         val descDiv = node.selectFirst("div.desc") ?: return null
         if (descDiv.selectFirst("i.fa-user") != null || descDiv.selectFirst("i.fa-external-link") != null) {
             return null // skip author
         }
-        val href = imgDiv.selectFirst("a")?.attrAsAbsoluteUrlOrNull("href") ?: return null
-        val title = descDiv.selectFirst("h3")?.selectFirst("a")?.text() ?: return null
+        val titleLink = descDiv.selectFirst("h3 a") ?: return null
+        val href = imgDiv?.selectFirst("a")?.attrAsAbsoluteUrlOrNull("href")
+            ?: titleLink.attrAsAbsoluteUrlOrNull("href") ?: return null
+        val title = titleLink.text()
         val tileInfo = descDiv.selectFirst("div.tile-info")
         val relUrl = href.toRelativeUrl(domain)
         if (relUrl.contains("://")) {
@@ -547,7 +551,7 @@ internal abstract class GroupleParser(
             publicUrl = href,
             title = title,
             altTitles = setOfNotNull(descDiv.selectFirst("h5")?.textOrNull()),
-            coverUrl = imgDiv.selectFirst("img.lazy")?.attrAsAbsoluteUrlOrNull("data-original")?.replace("_p.", "."),
+            coverUrl = imgDiv?.selectFirst("img.lazy")?.attrAsAbsoluteUrlOrNull("data-original")?.replace("_p.", "."),
             rating = runCatching {
                 node.selectFirst(".compact-rate")?.attr("title")?.toFloatOrNull()?.div(5f)
             }.getOrNull() ?: RATING_UNKNOWN,

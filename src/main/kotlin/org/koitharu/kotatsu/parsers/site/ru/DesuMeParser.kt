@@ -90,12 +90,12 @@ internal class DesuMeParser(context: MangaLoaderContext) :
         return manga.copy(
             url = publicUrl.toRelativeUrl(domain),
             publicUrl = publicUrl,
-            largeCoverUrl = doc.selectFirst("meta[property=og:image]")
-                ?.attrAsAbsoluteUrlOrNull("content") ?: manga.largeCoverUrl,
+            coverUrl = doc.selectFirst(".c-poster img[itemprop=image]")?.src() ?: manga.coverUrl,
+            largeCoverUrl = doc.selectFirst(".c-poster img[itemprop=image]")?.src() ?: manga.largeCoverUrl,
             tags = doc.select(".b-entry-info a[itemprop=genre]").mapNotNullToSet { element ->
                 val key = element.attr("href").substringAfter("genres=", "").takeIf(String::isNotEmpty)
                     ?: return@mapNotNullToSet null
-                MangaTag(key, element.text().removePrefix("#").trim(), manga.source)
+                MangaTag(title = element.text().removePrefix("#").trim(), key = key, source = manga.source)
             },
             description = doc.selectFirst("#description .russian")?.textOrNull(),
             chapters = doc.select(".chlist > li").mapChapters(reversed = true) { _, item ->
@@ -186,6 +186,29 @@ internal class DesuMeParser(context: MangaLoaderContext) :
     }
 
     private fun parseSearch(doc: Document): List<Manga> {
+        val cards = doc.select(".AniMangaSearchCard__link[href]")
+        if (cards.isNotEmpty()) {
+            return cards.mapNotNull { link ->
+                val publicUrl = link.attrAsAbsoluteUrl("href")
+                val url = publicUrl.toRelativeUrl(domain)
+                val mangaId = url.findGroupValue(MANGA_ID_REGEX)?.toLongOrNull() ?: return@mapNotNull null
+                val title = link.selectFirst(".AniMangaSearchCard__title")?.textOrNull() ?: return@mapNotNull null
+                Manga(
+                    id = generateUid(mangaId),
+                    url = url,
+                    publicUrl = publicUrl,
+                    source = source,
+                    title = title,
+                    altTitles = setOfNotNull(link.selectFirst(".AniMangaSearchCard__subtitle")?.textOrNull()),
+                    coverUrl = link.selectFirst("img")?.src(),
+                    state = null,
+                    rating = RATING_UNKNOWN,
+                    contentRating = null,
+                    tags = emptySet(),
+                    authors = emptySet(),
+                )
+            }
+        }
         val row = doc.select("#acpQuickSearch tr").firstOrNull {
             it.selectFirst("th")?.text() == "Манга"
         } ?: return emptyList()
