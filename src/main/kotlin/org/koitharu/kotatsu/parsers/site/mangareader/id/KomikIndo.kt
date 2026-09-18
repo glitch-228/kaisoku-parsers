@@ -27,6 +27,7 @@ internal class KomikIndo(context: MangaLoaderContext) :
 		get() = MangaListFilterCapabilities(
 			isSearchSupported = true,
 			isSearchWithFiltersSupported = true,
+			isMultipleTagsSupported = true,
 		)
 
 	override suspend fun getFilterOptions() = MangaListFilterOptions(

@@ -342,8 +342,67 @@ internal class MangagoParser(context: MangaLoaderContext) :
             )
         }
 
-        return result
-    }
+		return addNamedScanlatorBranches(result, chapters)
+	}
+
+	/**
+	 * Keep the existing unbranched list as the default so saved chapter ids, downloads and history
+	 * continue to point at the same release. Additional named scanlator branches expose an
+	 * uploader's own chapters, filling any gaps from that established default list.
+	 */
+	private fun addNamedScanlatorBranches(
+		canonical: List<MangaChapter>,
+		chapters: List<ChapterParseData>,
+	): List<MangaChapter> {
+		val groups = chapters.mapNotNull { chapter ->
+			chapter.scanlator
+				?.replace(WHITESPACE_REGEX, " ")
+				?.trim()
+				?.takeIf(String::isNotEmpty)
+				?.let { it to chapter }
+		}.groupBy({ it.first }, { it.second })
+		if (groups.size < 2) return canonical
+
+		val result = canonical.toMutableList()
+		for ((branch, group) in groups.entries.sortedByDescending { it.value.size }) {
+			val ownChapters = selectBranchChapters(group)
+			if (ownChapters.isEmpty()) continue
+			val ownNumbers = ownChapters.mapNotNullTo(HashSet()) { extractChapterNumber(it.name) }
+			val branchChapters = ownChapters.mapNotNull { chapter ->
+				val number = extractChapterNumber(chapter.name) ?: return@mapNotNull null
+				MangaChapter(
+					id = generateUid("${chapter.url}#$branch"),
+					url = chapter.url,
+					title = chapter.name,
+					number = number,
+					volume = 0,
+					uploadDate = chapter.dateUpload,
+					scanlator = chapter.scanlator,
+					branch = branch,
+					source = source,
+				)
+			} + canonical.filter { it.number !in ownNumbers }.map { chapter ->
+				chapter.copy(
+					id = generateUid("${chapter.url}#$branch"),
+					branch = branch,
+				)
+			}
+			result += branchChapters.sortedBy { it.number }
+		}
+		return result
+	}
+
+	private fun selectBranchChapters(chapters: List<ChapterParseData>): List<ChapterParseData> {
+		val selected = LinkedHashMap<Float, ChapterParseData>()
+		for (chapter in chapters) {
+			val number = extractChapterNumber(chapter.name) ?: continue
+			val existing = selected[number]
+			if (existing == null || chapter.name.length > existing.name.length) {
+				selected[number] = chapter
+			}
+		}
+		return selected.entries.sortedBy { it.key }.map { it.value }
+	}
 
     private fun extractTitleSuffix(title: String): String? {
         // Extract suffix like "Official" from "Ch.40 : Official" or "Good Translations" from "Ch.41 : Good Translations"
@@ -725,5 +784,6 @@ internal class MangagoParser(context: MangaLoaderContext) :
         private val COLS_REGEX = Regex("""var\s*widthnum\s*=\s*heightnum\s*=\s*(\d+);""")
         private val KEY_LOCATION_REGEX = Regex("""str\.charAt\(\s*(\d+)\s*\)""")
         private val JS_FILTERS = listOf("jQuery", "document", "getContext", "toDataURL", "getImageData", "width", "height")
+        private val WHITESPACE_REGEX = Regex("""\s+""")
     }
 }

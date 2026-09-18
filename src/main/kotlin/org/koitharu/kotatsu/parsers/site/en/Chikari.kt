@@ -25,6 +25,7 @@ import org.koitharu.kotatsu.parsers.util.parseJson
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
@@ -262,21 +263,42 @@ internal class Chikari(context: MangaLoaderContext) :
         return result
     }
 
-    private suspend fun fetchChapters(slug: String, detailsJson: JSONObject? = null): List<MangaChapter> {
-        try {
-            val url = "https://$domain/api/series/$slug/chapters".toHttpUrl().newBuilder()
-                .addQueryParameter("order", "desc")
-                .addQueryParameter("limit", "9999")
-                .addQueryParameter("offset", "0")
-                .build()
-                .toString()
+	private suspend fun fetchChapters(slug: String, detailsJson: JSONObject? = null): List<MangaChapter> {
+		try {
+			val limit = 200 // The API caps every response at 200 chapters.
+			fun buildUrl(offset: Int) = "https://$domain/api/series/$slug/chapters".toHttpUrl().newBuilder()
+				.addQueryParameter("order", "desc")
+				.addQueryParameter("limit", limit.toString())
+				.addQueryParameter("offset", offset.toString())
+				.build()
+				.toString()
 
-            val response = webClient.httpGet(url).parseJson()
-            response.optJSONArray("items")?.let { items ->
-                return parseChapterArray(items, slug)
-            }
-        } catch (e: CancellationException) {
-            throw e
+			val firstResponse = webClient.httpGet(buildUrl(0)).parseJson()
+			val total = firstResponse.optInt("total", 0)
+			val chapters = firstResponse.optJSONArray("items")
+				?.let { parseChapterArray(it, slug) }
+				?.toMutableList()
+				?: mutableListOf()
+
+			if (total > limit) {
+				val remaining = coroutineScope {
+					(limit until total step limit).map { offset ->
+						async {
+							webClient.httpGet(buildUrl(offset)).parseJson()
+								.optJSONArray("items")
+								?.let { parseChapterArray(it, slug) }
+								.orEmpty()
+						}
+					}.awaitAll()
+				}
+				remaining.forEach(chapters::addAll)
+			}
+
+			if (chapters.isNotEmpty()) {
+				return chapters.distinctBy { it.number }.sortedBy { it.number }
+			}
+		} catch (e: CancellationException) {
+			throw e
         } catch (_: Exception) {
         }
 

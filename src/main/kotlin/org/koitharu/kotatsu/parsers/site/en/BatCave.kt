@@ -1,9 +1,15 @@
 package org.koitharu.kotatsu.parsers.site.en
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.Headers
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.json.JSONObject
+import org.jsoup.HttpStatusException
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -34,7 +40,6 @@ internal class BatCave(context: MangaLoaderContext) :
 		.set("Sec-Fetch-Site", "none")
 		.set("Sec-Fetch-User", "?1")
 		.build()
-
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url.toString()
@@ -61,6 +66,10 @@ internal class BatCave(context: MangaLoaderContext) :
 
 	private val availableTags = suspendLazy(initializer = ::fetchTags)
 	private val captureAllPattern = Regex(".*")
+	private val dleGuardMutex = Mutex()
+
+	@Volatile
+	private var lastGuardSolveAt = 0L
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
@@ -68,7 +77,12 @@ internal class BatCave(context: MangaLoaderContext) :
         keys.add(ConfigKey.DisableUpdateChecking(defaultValue = true))
 	}
 
-	override val availableSortOrders: Set<SortOrder> = EnumSet.of(SortOrder.UPDATED)
+	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+		SortOrder.UPDATED,
+		SortOrder.POPULARITY,
+		SortOrder.NEWEST,
+		SortOrder.ALPHABETICAL,
+	)
 
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = MangaListFilterCapabilities(
@@ -90,6 +104,12 @@ internal class BatCave(context: MangaLoaderContext) :
 		// Try HTTP first - only use WebView if Cloudflare protection is detected
 		tryHttpDocument(initialUrl)?.let { doc ->
 			return doc
+		}
+
+		if (solveDleGuard(initialUrl)) {
+			tryHttpDocument(initialUrl)?.let { doc ->
+				return doc
+			}
 		}
 
 		// HTTP failed, likely due to Cloudflare protection - try WebView
@@ -134,6 +154,9 @@ internal class BatCave(context: MangaLoaderContext) :
 	private suspend fun tryHttpDocument(url: String): Document? {
 		val response = runCatching { webClient.httpGet(url) }.getOrNull() ?: return null
 		return response.use { res ->
+			if (res.request.url.isDleGuard()) {
+				return null
+			}
 			val doc = runCatching { res.parseHtml() }.getOrNull() ?: return null
 
 			// Check for successful BatCave content first
@@ -176,6 +199,9 @@ internal class BatCave(context: MangaLoaderContext) :
 		}
 
 		val doc = Jsoup.parse(html, url)
+		if (isDleGuardPage(doc)) {
+			return null
+		}
 
 		// Check for successful BatCave content instead of rejecting Cloudflare
 		if (hasValidBatCaveContent(doc)) {
@@ -192,13 +218,51 @@ internal class BatCave(context: MangaLoaderContext) :
 	}
 
 	private fun hasValidBatCaveContent(doc: Document): Boolean {
+		if (isDleGuardPage(doc)) {
+			return false
+		}
 		// Check for BatCave-specific content that indicates successful load
-		return doc.select("div.readed.d-flex.short").isNotEmpty() ||
+		return doc.select("#dle-content > .readed, div.readed.d-flex.short, #content-load > .latest.grid-item").isNotEmpty() ||
 			doc.select("script:containsData(__DATA__)").isNotEmpty() ||
 			doc.select("script:containsData(__XFILTER__)").isNotEmpty() ||
 			doc.select("h1.serie-title").isNotEmpty() ||
 			doc.title().contains("BatCave", ignoreCase = true)
 	}
+
+	private suspend fun solveDleGuard(url: String): Boolean = dleGuardMutex.withLock {
+		if (System.currentTimeMillis() - lastGuardSolveAt < GUARD_TRUST_WINDOW_MS) {
+			return@withLock true
+		}
+		val script = """
+			(() => new Promise(resolve => {
+				const started = Date.now();
+				const check = () => {
+					if (!location.pathname.startsWith("/_c") || document.cookie.indexOf("$DLE_GUARD_COOKIE=") >= 0) {
+						resolve("ok");
+					} else if (Date.now() - started > 25000) {
+						resolve("timeout");
+					} else {
+						setTimeout(check, 250);
+					}
+				};
+				check();
+			}))();
+		""".trimIndent()
+		runCatchingCancellable { context.evaluateJs(url, script, timeout = 30_000L) }
+		hasDleGuardTrust().also { solved ->
+			if (solved) {
+				lastGuardSolveAt = System.currentTimeMillis()
+			}
+		}
+	}
+
+	private fun hasDleGuardTrust(): Boolean =
+		context.cookieJar.getCookies(domain).any { it.name == DLE_GUARD_COOKIE }
+
+	private fun HttpUrl.isDleGuard(): Boolean = pathSegments.firstOrNull() == "_c"
+
+	private fun isDleGuardPage(doc: Document): Boolean =
+		doc.location().toHttpUrlOrNull()?.isDleGuard() == true
 
 	private fun isActiveCloudflareChallenge(html: String): Boolean {
 		if (html.length < 100) {
@@ -213,57 +277,121 @@ internal class BatCave(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		val urlBuilder = StringBuilder()
-		when {
+		val pagePath = if (page > 1) "page/$page/" else ""
+		val (sortBy, direction) = when (order) {
+			SortOrder.POPULARITY -> "rating" to "desc"
+			SortOrder.NEWEST -> "date" to "desc"
+			SortOrder.ALPHABETICAL -> "title" to "asc"
+			else -> "editdate" to "desc"
+		}
+		return when {
 			!filter.query.isNullOrEmpty() -> {
-				val encodedQuery = filter.query.splitByWhitespace().joinToString(separator = "%20") { part ->
-					part.urlEncoded()
-				}
-				urlBuilder.append("/search/")
-				urlBuilder.append(encodedQuery)
+				val url = "https://$domain".toHttpUrl().newBuilder()
+					.addPathSegment("search")
+					.addPathSegment(filter.query.trim())
 				if (page > 1) {
-					urlBuilder.append("/page/$page/")
+					url.addPathSegment("page").addPathSegment(page.toString())
 				}
+				parseReadedList(fetchDocument(url.addPathSegment("").build().toString()))
 			}
+
+			filter.tags.isNotEmpty() || filter.yearFrom != YEAR_UNKNOWN || filter.yearTo != YEAR_UNKNOWN -> {
+				val filterPath = buildString {
+					if (filter.yearFrom != YEAR_UNKNOWN) append("y[from]=").append(filter.yearFrom).append('/')
+					if (filter.yearTo != YEAR_UNKNOWN) append("y[to]=").append(filter.yearTo).append('/')
+					if (filter.tags.isNotEmpty()) append("g=").append(filter.tags.joinToString(",") { it.key }).append('/')
+				}
+				val form = mapOf(
+					"dlenewssortby" to sortBy,
+					"dledirection" to direction,
+					"set_new_sort" to "dle_sort_xfilter",
+					"set_direction_sort" to "dle_direction_xfilter",
+				)
+				parseReadedList(fetchDocument("https://$domain/ComicList/$filterPath$pagePath", form))
+				}
+
+			order == SortOrder.UPDATED -> parseLatestList(fetchDocument("https://$domain/$pagePath"))
 
 			else -> {
-				urlBuilder.append("/ComicList")
-				if (filter.yearFrom != YEAR_UNKNOWN) {
-					urlBuilder.append("/y[from]=${filter.yearFrom}")
-				}
-				if (filter.yearTo != YEAR_UNKNOWN) {
-					urlBuilder.append("/y[to]=${filter.yearTo}")
-				}
-				if (filter.tags.isNotEmpty()) {
-					urlBuilder.append("/g=")
-					urlBuilder.append(filter.tags.joinToString(",") { it.key })
-				}
-				urlBuilder.append("/sort")
-				if (page > 1) {
-					urlBuilder.append("/page/$page/")
-				}
+				val form = mapOf(
+					"dlenewssortby" to sortBy,
+					"dledirection" to direction,
+					"set_new_sort" to "dle_sort_cat_1",
+					"set_direction_sort" to "dle_direction_cat_1",
+				)
+				parseReadedList(fetchDocument("https://$domain/comix/$pagePath", form))
 			}
 		}
+	}
 
-		val fullUrl = urlBuilder.toString().toAbsoluteUrl(domain)
-		val doc = captureDocument(fullUrl)
-		return doc.select("div.readed.d-flex.short").map { item ->
-			val a = item.selectFirstOrThrow("a.readed__img.img-fit-cover.anim")
-			val titleElement = item.selectFirstOrThrow("h2.readed__title a")
-			val img = item.selectFirst("img[data-src]")
-			val href = a.attrAsRelativeUrl("href")
+	private suspend fun fetchDocument(url: String, form: Map<String, String>? = null): Document {
+		var guardSolved = false
+		while (true) {
+			val result = runCatchingCancellable {
+				if (form == null) webClient.httpGet(url) else webClient.httpPost(url.toHttpUrl(), form)
+			}
+			val response = result.getOrNull()
+			val error = result.exceptionOrNull()
+			val isGuarded = response?.request?.url?.isDleGuard() == true ||
+				(error as? HttpStatusException)?.url?.toHttpUrlOrNull()?.isDleGuard() == true
+			if (!isGuarded) {
+				if (error != null) throw error
+				val doc = checkNotNull(response).parseHtml()
+				if (isActiveCloudflareChallenge(doc.outerHtml())) {
+					context.requestBrowserAction(this, url)
+				}
+				return doc
+			}
+			response?.close()
+			if (guardSolved || !solveDleGuard(if (form == null) url else "https://$domain/")) {
+				context.requestBrowserAction(this, url)
+			}
+			guardSolved = true
+		}
+	}
+
+	private fun parseLatestList(doc: Document): List<Manga> {
+		return doc.select("#content-load > .latest.grid-item").mapNotNull { item ->
+			val titleElement = item.selectFirst(".latest__title > a") ?: return@mapNotNull null
+			val title = titleElement.ownText().trim().ifEmpty { return@mapNotNull null }
+			val href = titleElement.attrAsRelativeUrlOrNull("href") ?: return@mapNotNull null
+			val img = item.selectFirst(".latest__img img")
 			Manga(
 				id = generateUid(href),
 				url = href,
-				publicUrl = a.attr("href"),
-				title = titleElement.text(),
+				publicUrl = titleElement.attrAsAbsoluteUrl("href"),
+				title = title,
 				altTitles = emptySet(),
 				authors = emptySet(),
 				description = null,
 				tags = emptySet(),
 				rating = RATING_UNKNOWN,
 				state = null,
-				coverUrl = img?.attrAsAbsoluteUrlOrNull("data-src"),
+				coverUrl = img?.attrAsAbsoluteUrlOrNull("src") ?: img?.attrAsAbsoluteUrlOrNull("data-src"),
+				contentRating = if (isNsfwSource) ContentRating.ADULT else null,
+				source = source,
+			)
+		}
+	}
+
+	private fun parseReadedList(doc: Document): List<Manga> {
+		val items = doc.select("#dle-content > .readed").ifEmpty { doc.select("div.readed.d-flex.short") }
+		return items.mapNotNull { item ->
+			val titleElement = item.selectFirst(".readed__title > a") ?: return@mapNotNull null
+			val href = titleElement.attrAsRelativeUrlOrNull("href") ?: return@mapNotNull null
+			val img = item.selectFirst(".readed__img img")
+			Manga(
+				id = generateUid(href),
+				url = href,
+				publicUrl = titleElement.attrAsAbsoluteUrl("href"),
+				title = titleElement.ownText().ifEmpty { titleElement.text() },
+				altTitles = emptySet(),
+				authors = emptySet(),
+				description = null,
+				tags = emptySet(),
+				rating = RATING_UNKNOWN,
+				state = null,
+				coverUrl = img?.attrAsAbsoluteUrlOrNull("data-src") ?: img?.attrAsAbsoluteUrlOrNull("src"),
 				contentRating = if (isNsfwSource) ContentRating.ADULT else null,
 				source = source,
 			)
@@ -382,5 +510,11 @@ internal class BatCave(context: MangaLoaderContext) :
 				source = source,
 			)
 		}
+	}
+
+	private companion object {
+
+		const val DLE_GUARD_COOKIE = "__guard_trust"
+		const val GUARD_TRUST_WINDOW_MS = 5_000L
 	}
 }

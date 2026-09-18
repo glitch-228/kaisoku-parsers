@@ -51,6 +51,7 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 			ContentType.MANHWA,
 			ContentType.MANHUA,
 			ContentType.ONE_SHOT,
+			ContentType.OTHER,
 		),
 		availableDemographics = EnumSet.of(
 			Demographic.SHOUNEN,
@@ -293,6 +294,7 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 		ContentType.MANHWA -> "KR"
 		ContentType.MANHUA -> "CN"
 		ContentType.ONE_SHOT -> "ONESHOT"
+		ContentType.OTHER -> "EN"
 		else -> null
 	}
 
