@@ -287,6 +287,7 @@ internal class AtsuMoe(context: MangaLoaderContext) :
         )
     }
 
+    override suspend fun getPageUrl(page: MangaPage): String = toAtsuCdnUrl(page.url)
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {
         return emptyList()
     }

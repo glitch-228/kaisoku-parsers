@@ -430,6 +430,7 @@ internal class Atsumaru(context: MangaLoaderContext) :
         )
     }
 
+    override suspend fun getPageUrl(page: MangaPage): String = toAtsuCdnUrl(page.url)
     private fun JSONObject.toManga(): Manga {
         val id = getString("id")
         val title = optString("title").ifEmpty { optString("englishTitle", "Unknown") }
