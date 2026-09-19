@@ -1,6 +1,8 @@
 package org.koitharu.kotatsu.parsers.site.en
 
+import okhttp3.Interceptor
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Response
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
@@ -255,7 +257,13 @@ internal class AtsuMoe(context: MangaLoaderContext) :
         return (0 until pages.length()).map { i ->
             val page = pages.getJSONObject(i)
             val imagePath = page.getString("image")
-            val fullUrl = "https://$domain$imagePath"
+            val fullUrl = toAtsuCdnUrl(
+                when {
+                    imagePath.startsWith("http") -> imagePath
+                    imagePath.startsWith("//") -> "https:$imagePath"
+                    else -> "https://$domain/static/${imagePath.removePrefix("/").removePrefix("static/")}"
+                },
+            )
 
             MangaPage(
                 id = generateUid(fullUrl),
@@ -266,7 +274,21 @@ internal class AtsuMoe(context: MangaLoaderContext) :
         }
     }
 
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        if (!request.url.host.startsWith("cdn.")) {
+            return chain.proceed(request)
+        }
+        return chain.proceed(
+            request.newBuilder()
+                .header("Accept", "image/avif,image/webp,*/*")
+                .header("Referer", "https://$domain/")
+                .build(),
+        )
+    }
+
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {
         return emptyList()
     }
+
 }

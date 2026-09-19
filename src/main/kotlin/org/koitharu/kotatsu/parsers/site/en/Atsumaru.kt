@@ -2,6 +2,8 @@ package org.koitharu.kotatsu.parsers.site.en
 
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -404,13 +406,28 @@ internal class Atsumaru(context: MangaLoaderContext) :
         return (0 until pagesArray.length()).map { i ->
             val page = pagesArray.getJSONObject(i)
             val imagePath = page.getString("image")
-            val fullUrl = when {
-                imagePath.startsWith("http") -> imagePath
-                imagePath.startsWith("//") -> "https:$imagePath"
-                else -> "https://$domain/static/${imagePath.removePrefix("/").removePrefix("static/")}"
-            }
+            val fullUrl = toAtsuCdnUrl(
+                when {
+                    imagePath.startsWith("http") -> imagePath
+                    imagePath.startsWith("//") -> "https:$imagePath"
+                    else -> "https://$domain/static/${imagePath.removePrefix("/").removePrefix("static/")}"
+                },
+            )
             MangaPage(id = generateUid(fullUrl), url = fullUrl, preview = null, source = source)
         }
+    }
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        if (!request.url.host.startsWith("cdn.")) {
+            return chain.proceed(request)
+        }
+        return chain.proceed(
+            request.newBuilder()
+                .header("Accept", "image/avif,image/webp,*/*")
+                .header("Referer", "$baseUrl/")
+                .build(),
+        )
     }
 
     private fun JSONObject.toManga(): Manga {
@@ -459,4 +476,5 @@ internal class Atsumaru(context: MangaLoaderContext) :
 
     private data class Genre(val name: String, val id: String)
     private data class Tag(val name: String, val id: String)
+
 }
