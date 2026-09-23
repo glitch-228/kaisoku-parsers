@@ -17,7 +17,6 @@ import org.koitharu.kotatsu.parsers.network.UserAgents
 import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.json.mapJSON
-import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -52,7 +51,6 @@ internal class MangaOvhUpdatesParser(context: MangaLoaderContext) :
 		get() = "https://sso.inuko.me/account/sign-in"
 
 	private val normalizedDomain = normalizeDomain(domain)
-	private val apiDomain = "api.$normalizedDomain"
 
 	private fun checkAuth(): Boolean {
 		val authCookieName = "__otaku_session"
@@ -87,29 +85,14 @@ internal class MangaOvhUpdatesParser(context: MangaLoaderContext) :
 			return emptyList()
 		}
 
-		val urlBuilder = HttpUrl.Builder()
-			.scheme("https")
-			.host(apiDomain)
-			.addPathSegment("v2")
-			.addPathSegment("chapter-update-feed")
-
-		urlBuilder.addQueryParameter("onlyBorderChapters", "true")
-		urlBuilder.addQueryParameter("sort", "updatedAt,desc")
-		urlBuilder.addQueryParameter("page", page.toString())
-		urlBuilder.addQueryParameter("size", pageSize.toString())
-
-		val requestUrl = urlBuilder.build()
-		val response = webClient.httpGet(requestUrl).parseJsonArray()
-		val seenSlugs = HashSet<String>(response.length())
-
-		return response.mapJSONNotNull { feedItem ->
-			val book = feedItem.optJSONObject("book") ?: return@mapJSONNotNull null
-			val slug = book.getStringOrNull("slug") ?: return@mapJSONNotNull null
-			if (!seenSlugs.add(slug)) {
-				return@mapJSONNotNull null
-			}
-			parseMangaFromJson(book)
-		}
+		// The old API feed was retired. The public catalog exposes the same latest-chapter ordering.
+		val url = HttpUrl.Builder().scheme("https").host(normalizedDomain).addPathSegment("content")
+			.addQueryParameter("sort", "latestChapterAt").addQueryParameter("orderBy", "desc")
+			.addQueryParameter("page", page.toString()).addQueryParameter("size", pageSize.toString()).build()
+		val data = fetchAstroData(url.toString())
+		val books = data?.get("catalog-books") as? List<*>
+			?: throw ParseException("Cannot load InkStory updates", url.toString())
+		return books.map { parseMangaFromJson(JSONObject(it as Map<*, *>)) }
 	}
 
 	private fun parseMangaFromJson(json: JSONObject): Manga {
@@ -159,7 +142,8 @@ internal class MangaOvhUpdatesParser(context: MangaLoaderContext) :
 				?: throw ParseException("Cannot load InkStory chapters", manga.publicUrl)
 		}
 
-		val bookData = data["current-book"] as? Map<*, *> ?: return manga
+		val bookData = data["current-book"] as? Map<*, *>
+			?: throw ParseException("Missing InkStory book data", manga.publicUrl)
 		val branchesData = data["current-book-branches"] as? List<Map<*, *>> ?: emptyList()
 		val chaptersData = data["current-book-chapters"] as? List<Map<*, *>> ?: emptyList()
 
@@ -238,23 +222,6 @@ internal class MangaOvhUpdatesParser(context: MangaLoaderContext) :
 			else -> 0f
 		}
 	}
-	private suspend fun resolvePageUrl(pageId: String): String? {
-		val url = HttpUrl.Builder()
-			.scheme("https")
-			.host(apiDomain)
-			.addPathSegment("v2")
-			.addPathSegment("pages")
-			.addPathSegment(pageId)
-			.addPathSegment("image")
-			.build()
-
-		return runCatching {
-			webClient.httpGet(url).use { response ->
-				val responseText = response.body?.string() ?: return null
-				JSONObject(responseText).getStringOrNull("url")
-			}
-		}.getOrNull()
-	}
 
 	private fun normalizePageImageUrl(rawUrl: String, secretKey: String?): String {
 		val originalUrl = rawUrl.toHttpUrlOrNull() ?: return rawUrl
@@ -320,10 +287,7 @@ internal class MangaOvhUpdatesParser(context: MangaLoaderContext) :
 				val imageUrl = (pageMap["image"] as? String)
 					?.ifBlank { null }
 					?.let { normalizePageImageUrl(it, secretKey) }
-					?: resolvePageUrl(id)
-						?.ifBlank { null }
-						?.let { normalizePageImageUrl(it, secretKey) }
-					?: return@mapNotNull null
+					?: throw ParseException("InkStory page has no image: $id", chapter.url)
 
 				MangaPage(
 					id = generateUid(id),

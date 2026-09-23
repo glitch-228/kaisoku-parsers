@@ -45,12 +45,41 @@ internal class InkStoryStateTest {
         assertEquals("Продолжение первой части", details.description)
     }
 
+    @Test fun `catalog search pagination and update ordering use the public site`() = runTest {
+        for (updates in listOf(false, true)) {
+            val context = Context()
+            val parser = if (updates) MangaOvhUpdatesParser(context) else MangaOVHParser(context)
+            val books = parser.getList(30, if (updates) SortOrder.UPDATED else SortOrder.NEWEST,
+                MangaListFilter(query = if (updates) null else "Берсерк"))
+            assertEquals(2, books.size)
+            assertEquals("Поднятие уровня в одиночку", books.first().title)
+            assertTrue(books.first().publicUrl.startsWith("https://inkstory.net/content/"))
+            val url = context.urls.last()
+            assertEquals("inkstory.net", url.host)
+            assertEquals("1", url.queryParameter("page"))
+            assertEquals(if (updates) "latestChapterAt" else "createdAt", url.queryParameter("sort"))
+            assertEquals("desc", url.queryParameter("orderBy"))
+            if (!updates) assertEquals("Берсерк", url.queryParameter("search"))
+        }
+    }
+
+    @Test fun `catalog filters resolve persisted genre slugs to current ids`() = runTest {
+        val context = Context()
+        val parser = MangaOVHParser(context)
+        val tag = MangaTag(key = "psychological", title = "Psychology", source = parser.source)
+        parser.getList(0, SortOrder.POPULARITY, MangaListFilter(tags = setOf(tag)))
+        assertEquals("[\"636a3e16-bcd0-4b38-b391-5a98e068afc0\"]", context.urls.last().queryParameter("labelsInclude"))
+    }
+
     private class Context(val noPoster: Boolean = false) : MangaLoaderContext() {
         val requests = ArrayList<String>()
+        val urls = ArrayList<HttpUrl>()
         override val cookieJar = CookieJar.NO_COOKIES
         override val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
+            urls.add(chain.request().url)
             val path = chain.request().url.encodedPath
             val fixture = when {
+                path == "/content" -> "catalog"
                 path.endsWith("/chapters") -> "chapters"
                 path.endsWith("a23602d4-a643-46e3-afed-e723c65f434e") -> "chapter"
                 else -> "details"

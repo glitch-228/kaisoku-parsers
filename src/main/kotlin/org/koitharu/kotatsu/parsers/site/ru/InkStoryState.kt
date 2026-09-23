@@ -35,6 +35,8 @@ internal fun inkStoryStateScript(state: String): String = """
                 data.session = {currentUser: before.root.currentUser};
             }
             if (before.book || loader.book) data['current-book'] = before.book || loader.book;
+            if (loader.books) data['catalog-books'] = loader.books;
+            if (loader.labels) data['catalog-labels'] = loader.labels;
             if (loader.branches) data['current-book-branches'] = loader.branches;
             if (loader.chapters) data['current-book-chapters'] = loader.chapters;
             if (loader.initialChapter) data['reader-current-chapter'] = loader.initialChapter;

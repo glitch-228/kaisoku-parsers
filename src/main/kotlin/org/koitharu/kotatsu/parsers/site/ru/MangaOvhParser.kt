@@ -56,14 +56,13 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 		isTagsExclusionSupported = true,
 		isYearRangeSupported = true,
 		isSearchWithFiltersSupported = true,
-		isAuthorSearchSupported = true,
+		isAuthorSearchSupported = false,
 	)
 
 	override val authUrl: String
 		get() = "https://sso.inuko.me/account/sign-in"
 
 	private val normalizedDomain = normalizeDomain(domain)
-	private val apiDomain = "api.$normalizedDomain"
 
 	private fun checkAuth(): Boolean {
 		val authCookieName = "__otaku_session"
@@ -95,101 +94,50 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		if (!filter.author.isNullOrBlank()) {
-			return getListPageByAuthor(filter.author, page)
+			throw ParseException("InkStory author search is unavailable after the site migration", "https://$normalizedDomain/content")
 		}
-
-		val urlBuilder = HttpUrl.Builder()
-			.scheme("https")
-			.host(apiDomain)
-			.addPathSegment("v2")
-			.addPathSegment("books")
-
-		urlBuilder.addQueryParameter("page", page.toString())
-		urlBuilder.addQueryParameter("size", pageSize.toString())
-
-		urlBuilder.addQueryParameter("sort", getSortParameter(order))
-
-		if (!filter.query.isNullOrBlank()) {
-			urlBuilder.addQueryParameter("search", filter.query)
+		val sort = getSortParameter(order).split(',')
+		val url = HttpUrl.Builder().scheme("https").host(normalizedDomain).addPathSegment("content")
+			.addQueryParameter("page", page.toString()).addQueryParameter("size", pageSize.toString())
+			.addQueryParameter("sort", sort[0]).addQueryParameter("orderBy", sort[1])
+		filter.query?.takeIf(String::isNotBlank)?.let { url.addQueryParameter("search", it) }
+		if (filter.tags.isNotEmpty() || filter.tagsExclude.isNotEmpty()) {
+			val labels = catalogLabels()
+			fun ids(tags: Set<MangaTag>) = JSONArray(tags.map { tag ->
+				labels.firstOrNull { it["slug"] == tag.key || it["id"] == tag.key }?.get("id")
+					?: throw ParseException("InkStory genre is no longer available: ${tag.title}", url.toString())
+			}).toString()
+			if (filter.tags.isNotEmpty()) url.addQueryParameter("labelsInclude", ids(filter.tags))
+			if (filter.tagsExclude.isNotEmpty()) url.addQueryParameter("labelsExclude", ids(filter.tagsExclude))
 		}
-
-		filter.tags.forEach { tag ->
-			urlBuilder.addQueryParameter("labelsInclude", tag.key)
-		}
-
-		filter.tagsExclude.forEach { tag ->
-			urlBuilder.addQueryParameter("labelsExclude", tag.key)
-		}
-
-		filter.states.forEach { state ->
-			urlBuilder.addQueryParameter("status", when(state) {
+		if (filter.states.isNotEmpty()) url.addQueryParameter("status", JSONArray(filter.states.mapNotNull {
+			when (it) {
 				MangaState.ONGOING -> "ONGOING"
 				MangaState.FINISHED -> "DONE"
 				MangaState.PAUSED -> "FROZEN"
 				MangaState.UPCOMING -> "ANNOUNCE"
-				else -> ""
-			})
-		}
-
-		filter.contentRating.forEach { rating ->
-			urlBuilder.addQueryParameter("contentStatus", when(rating) {
+				else -> null
+			}
+		}).toString())
+		if (filter.contentRating.isNotEmpty()) url.addQueryParameter("contentStatus", JSONArray(filter.contentRating.map {
+			when (it) {
 				ContentRating.SAFE -> "SAFE"
 				ContentRating.SUGGESTIVE -> "UNSAFE"
 				ContentRating.ADULT -> "EROTIC"
-			})
-		}
-
-		if (filter.yearFrom != YEAR_UNKNOWN) {
-			urlBuilder.addQueryParameter("yearMin", filter.yearFrom.toString())
-		}
-		if (filter.yearTo != YEAR_UNKNOWN) {
-			urlBuilder.addQueryParameter("yearMax", filter.yearTo.toString())
-		}
-
-		val requestUrl = urlBuilder.build()
-		val response = webClient.httpGet(requestUrl).parseJsonArray()
-
-		return response.mapJSON { parseMangaFromJson(it) }
+			}
+		}).toString())
+		if (filter.yearFrom != YEAR_UNKNOWN) url.addQueryParameter("yearMin", filter.yearFrom.toString())
+		if (filter.yearTo != YEAR_UNKNOWN) url.addQueryParameter("yearMax", filter.yearTo.toString())
+		val data = fetchAstroData(url.build().toString())
+		val books = data?.get("catalog-books") as? List<*>
+			?: throw ParseException("Cannot load InkStory catalog", url.toString())
+		return books.map { parseMangaFromJson(JSONObject(it as Map<*, *>)) }
 	}
 
-	private suspend fun getListPageByAuthor(authorQuery: String, page: Int): List<Manga> {
-		val authorSearchUrl = HttpUrl.Builder()
-			.scheme("https")
-			.host(apiDomain)
-			.addPathSegment("v2")
-			.addPathSegment("publishers")
-			.addQueryParameter("search", authorQuery)
-			.build()
-
-		val publishersResponse = webClient.httpGet(authorSearchUrl).parseJsonArray()
-
-		var authorId: String? = null
-		for (i in 0 until publishersResponse.length()) {
-			val publisher = publishersResponse.getJSONObject(i)
-			if (publisher.getStringOrNull("kind") == "AUTHOR") {
-				authorId = publisher.getStringOrNull("id")
-				break
-			}
-		}
-
-		if (authorId == null) {
-			return emptyList()
-		}
-
-		val booksByAuthorUrl = HttpUrl.Builder()
-			.scheme("https")
-			.host(apiDomain)
-			.addPathSegment("v2")
-			.addPathSegment("books")
-			.addQueryParameter("publisherId", authorId)
-			.addQueryParameter("page", page.toString())
-			.addQueryParameter("size", pageSize.toString())
-			.addQueryParameter("sort", "createdAt,desc")
-			.build()
-
-		val booksResponse = webClient.httpGet(booksByAuthorUrl).parseJsonArray()
-
-		return booksResponse.mapJSON { parseMangaFromJson(it) }
+	private suspend fun catalogLabels(): List<Map<*, *>> {
+		val data = fetchAstroData("/content?size=1")
+		return (data?.get("catalog-labels") as? List<*>)?.map { it as Map<*, *> }
+			?: throw ParseException("Cannot load InkStory genres", "https://$normalizedDomain/content")
 	}
 
 	private fun parseMangaFromJson(json: JSONObject): Manga {
@@ -253,7 +201,8 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 				?: throw ParseException("Cannot load InkStory chapters", manga.publicUrl)
 		}
 
-		val bookData = data["current-book"] as? Map<*, *> ?: return manga
+		val bookData = data["current-book"] as? Map<*, *>
+			?: throw ParseException("Missing InkStory book data", manga.publicUrl)
 		val branchesData = data["current-book-branches"] as? List<Map<*, *>> ?: emptyList()
 		val chaptersData = data["current-book-chapters"] as? List<Map<*, *>> ?: emptyList()
 
@@ -332,23 +281,6 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 			else -> 0f
 		}
 	}
-	private suspend fun resolvePageUrl(pageId: String): String? {
-		val url = HttpUrl.Builder()
-			.scheme("https")
-			.host(apiDomain)
-			.addPathSegment("v2")
-			.addPathSegment("pages")
-			.addPathSegment(pageId)
-			.addPathSegment("image")
-			.build()
-
-		return runCatching {
-			webClient.httpGet(url).use { response ->
-				val responseText = response.body?.string() ?: return null
-				JSONObject(responseText).getStringOrNull("url")
-			}
-		}.getOrNull()
-	}
 
 	private fun normalizePageImageUrl(rawUrl: String, secretKey: String?): String {
 		val originalUrl = rawUrl.toHttpUrlOrNull() ?: return rawUrl
@@ -414,10 +346,7 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 				val imageUrl = (pageMap["image"] as? String)
 					?.ifBlank { null }
 					?.let { normalizePageImageUrl(it, secretKey) }
-					?: resolvePageUrl(id)
-						?.ifBlank { null }
-						?.let { normalizePageImageUrl(it, secretKey) }
-					?: return@mapNotNull null
+					?: throw ParseException("InkStory page has no image: $id", chapter.url)
 
 				MangaPage(
 					id = generateUid(id),
@@ -450,53 +379,13 @@ internal class MangaOVHParser(context: MangaLoaderContext,) :
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions {
 		return MangaListFilterOptions(
-			availableTags = allGenres.toSet(),
+			availableTags = catalogLabels().mapTo(HashSet()) { label ->
+				MangaTag(key = label["slug"] as String, title = label["name"] as String, source = source)
+			},
 			availableStates = allStates,
 			availableContentRating = allContentRatings
 		)
 	}
-
-	private val allGenres: List<MangaTag> = listOf(
-		MangaTag(key = "art", title = "Арт", source = source),
-		MangaTag(key = "martial_arts", title = "Боевые искусства", source = source),
-		MangaTag(key = "vampires", title = "Вампиры", source = source),
-		MangaTag(key = "harem", title = "Гарем", source = source),
-		MangaTag(key = "gender_intriga", title = "Гендерная интрига", source = source),
-		MangaTag(key = "detective", title = "Детектив", source = source),
-		MangaTag(key = "josei", title = "Дзёсэй", source = source),
-		MangaTag(key = "game", title = "Игра", source = source),
-		MangaTag(key = "cyberpunk", title = "Киберпанк", source = source),
-		MangaTag(key = "maho_shoujo", title = "Махо-сёдзё", source = source),
-		MangaTag(key = "mecha", title = "Меха", source = source),
-		MangaTag(key = "mystery", title = "Мистика", source = source),
-		MangaTag(key = "sci_fi", title = "Научная фантастика", source = source),
-		MangaTag(key = "natural", title = "Повседневность", source = source),
-		MangaTag(key = "postapocalypse", title = "Постапокалипсис", source = source),
-		MangaTag(key = "adventure", title = "Приключения", source = source),
-		MangaTag(key = "psychological", title = "Психология", source = source),
-		MangaTag(key = "samurai", title = "Самураи", source = source),
-		MangaTag(key = "supernatural", title = "Сверхъестественное", source = source),
-		MangaTag(key = "sports", title = "Спорт", source = source),
-		MangaTag(key = "seinen", title = "Сэйнэн", source = source),
-		MangaTag(key = "thriller", title = "Триллер", source = source),
-		MangaTag(key = "horror", title = "Ужасы", source = source),
-		MangaTag(key = "fantastic", title = "Фантастика", source = source),
-		MangaTag(key = "fantasy", title = "Фэнтези", source = source),
-		MangaTag(key = "school", title = "Школа", source = source),
-		MangaTag(key = "erotica", title = "Эротика", source = source),
-		MangaTag(key = "ecchi", title = "Этти", source = source),
-		MangaTag(key = "codomo", title = "Кодомо", source = source),
-		MangaTag(key = "isekai", title = "Исекай", source = source),
-		MangaTag(key = "omegavers", title = "Омегаверс", source = source),
-		MangaTag(key = "comedy", title = "Комедия", source = source),
-		MangaTag(key = "shounen", title = "Сёнэн", source = source),
-		MangaTag(key = "romance", title = "Романтика", source = source),
-		MangaTag(key = "drama", title = "Драма", source = source),
-		MangaTag(key = "shoujo", title = "Сёдзё", source = source),
-		MangaTag(key = "historical", title = "История", source = source),
-		MangaTag(key = "tragedy", title = "Трагедия", source = source),
-		MangaTag(key = "action", title = "Боевик", source = source)
-	).sortedBy { it.title }
 
 	private val allStates: Set<MangaState> = EnumSet.of(
 		MangaState.ONGOING,
