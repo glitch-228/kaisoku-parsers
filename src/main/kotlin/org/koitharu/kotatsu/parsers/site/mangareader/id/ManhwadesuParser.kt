@@ -12,6 +12,7 @@ import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 internal class ManhwadesuParser(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.MANHWADESU, "manhwadesu.im", pageSize = 20, searchPageSize = 10) {
 	override val configKeyDomain = ConfigKey.Domain(
+		"manhwadesu.wiki",
 		"manhwadesu.im",
 		"manhwadesu.cx",
 		"manhwadesu.com",
