@@ -35,15 +35,7 @@ import org.koitharu.kotatsu.parsers.util.parseSafe
 import org.koitharu.kotatsu.parsers.util.runCatchingCancellable
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
-import java.math.BigInteger
-import java.security.AlgorithmParameters
-import java.security.KeyFactory
 import java.security.MessageDigest
-import java.security.PrivateKey
-import java.security.SecureRandom
-import java.security.Signature
-import java.security.spec.ECGenParameterSpec
-import java.security.spec.ECPrivateKeySpec
 import java.text.SimpleDateFormat
 import java.util.Base64
 import java.util.EnumSet
@@ -376,17 +368,21 @@ internal class LunarAnime(context: MangaLoaderContext) :
 			.toCollection(LinkedHashSet())
 	}
 
-	private suspend fun apiGetJson(url: String, requiresDeviceKey: Boolean = false): JSONObject {
+	private suspend fun apiGetJson(
+		url: String,
+		requiresDeviceKey: Boolean = false,
+		browserUrl: String = "https://$domain/",
+	): JSONObject {
 		val request = Request.Builder()
 			.get()
 			.url(url)
-			.headers(apiHeaders("GET", url, requiresDeviceKey))
+			.headers(apiHeaders("GET", url, requiresDeviceKey, browserUrl))
 			.tag(MangaSource::class.java, source)
 			.build()
 		return context.httpClient.newCall(request).await().use { response ->
 			val body = response.body.string()
 			if (response.code == 403 && body.isDeviceValidationResponse()) {
-				requestDeviceValidation()
+				requestDeviceValidation(browserUrl)
 			}
 			if (!response.isSuccessful) {
 				throw HttpStatusException(response.message, response.code, response.request.url.toString())
@@ -395,110 +391,42 @@ internal class LunarAnime(context: MangaLoaderContext) :
 		}
 	}
 
-	private suspend fun apiHeaders(method: String, url: String, requiresDeviceKey: Boolean): Headers {
-		val dpop = if (requiresDeviceKey) signUrl(method, url.substringBefore('?')) else ""
+	private suspend fun apiHeaders(method: String, url: String, requiresDeviceKey: Boolean, browserUrl: String): Headers {
+		val proof = if (requiresDeviceKey) signUrl(method, url, browserUrl) else ""
 		return getRequestHeaders().newBuilder().apply {
-			if (dpop.isNotEmpty()) {
-				add("dpop", dpop)
-			}
+			if (proof.isNotEmpty()) add(LunarReaderSession.PROOF_HEADER, proof)
 		}.build()
 	}
 
-	private fun requestDeviceValidation(): Nothing {
+	private fun requestDeviceValidation(validationUrl: String): Nothing {
 		keyPairJson = null
-		dpopPrivateKey = null
-		val validationUrl = "https://$domain/validate?redirect=/"
 		try {
 			context.requestBrowserAction(this, validationUrl)
 		} catch (e: UnsupportedOperationException) {
 			throw ParseException(
-				"Device validation required. Open Lunar Manga in WebView and retry.",
+				"Device validation required. Open this chapter in WebView and retry.",
 				validationUrl,
 				e,
 			)
 		}
 	}
 
-	private suspend fun signUrl(method: String, url: String): String {
-		if (keyPairJson == null) {
-			val raw = exportDeviceKeys() ?: return ""
-			val parsed = runCatching { JSONObject(raw) }.getOrNull() ?: return ""
-			val privateKey = runCatching {
-				buildPrivateKey(parsed.getJSONObject("privateJwk"))
-			}.getOrNull() ?: return ""
-			keyPairJson = parsed
-			dpopPrivateKey = privateKey
-		}
-		val keyPair = keyPairJson ?: return ""
-		val privateKey = dpopPrivateKey ?: return ""
-		return runCatching {
-			buildDpop(method, url, privateKey, keyPair.getJSONObject("publicJwk"))
-		}.getOrDefault("")
-	}
-
-	private suspend fun exportDeviceKeys(): String? {
-		val raw = runCatching {
-			context.evaluateJs("https://$domain/", EXPORT_KEYS_JS, 5000L)
-		}.getOrNull()?.decodeWebViewString()
-		return raw?.takeUnless {
-			it.isBlank() || it == "null" || it == "{}"
-		}
-	}
-
-	private val curveSpec: java.security.spec.ECParameterSpec by lazy {
-		AlgorithmParameters.getInstance("EC").apply {
-			init(ECGenParameterSpec("secp256r1"))
-		}.getParameterSpec(java.security.spec.ECParameterSpec::class.java)
-	}
-
-	private fun buildDpop(method: String, url: String, privateKey: PrivateKey, publicJwk: JSONObject): String {
-		val headerEncoded = base64UrlEncode(
-			JSONObject()
-				.put("typ", "dpop+jwt")
-				.put("alg", "ES256")
-				.put("jwk", publicJwk),
-		)
-		val payloadEncoded = base64UrlEncode(
-			JSONObject()
-				.put("htm", method.uppercase(Locale.ROOT))
-				.put("htu", url)
-				.put("iat", System.currentTimeMillis() / 1000)
-				.put("jti", base64UrlEncode(ByteArray(16).apply { SecureRandom().nextBytes(this) })),
-		)
-		val signingInput = "$headerEncoded.$payloadEncoded"
-		val derSignature = Signature.getInstance("SHA256withECDSA").apply {
-			initSign(privateKey)
-			update(signingInput.toByteArray(Charsets.UTF_8))
-		}.sign()
-		return "$signingInput.${base64UrlEncode(derToP1363(derSignature))}"
-	}
-
-	private fun buildPrivateKey(jwk: JSONObject): PrivateKey {
-		val privateValue = BigInteger(1, Base64.getUrlDecoder().decode(jwk.getString("d").padBase64()))
-		return KeyFactory.getInstance("EC").generatePrivate(ECPrivateKeySpec(privateValue, curveSpec))
-	}
-
-	private fun derToP1363(der: ByteArray): ByteArray {
-		val out = ByteArray(64)
-		val rLen = der[3].toInt() and 0xFF
-		val rOffset = 4
-		val rOctets = der.copyOfRange(rOffset, rOffset + rLen)
-		val sLenOffset = rOffset + rLen + 1
-		val sLen = der[sLenOffset].toInt() and 0xFF
-		val sOffset = sLenOffset + 1
-		val sOctets = der.copyOfRange(sOffset, sOffset + sLen)
-		val rBig = BigInteger(1, rOctets).toByteArray().takeLast(32).toByteArray()
-		val sBig = BigInteger(1, sOctets).toByteArray().takeLast(32).toByteArray()
-		System.arraycopy(rBig, 0, out, 32 - rBig.size, rBig.size)
-		System.arraycopy(sBig, 0, out, 64 - sBig.size, sBig.size)
-		return out
+	private suspend fun signUrl(method: String, url: String, browserUrl: String): String {
+		val raw = context.evaluateJs(
+			"https://$domain/", LunarReaderSession.proofScript(method, url), 10000L,
+		)?.decodeWebViewString()
+		val result = raw?.let { runCatching { JSONObject(it) }.getOrNull() }
+		val proof = result?.optString("proof").orEmpty()
+		if (proof.isEmpty()) requestDeviceValidation(browserUrl)
+		keyPairJson = result?.optJSONObject("publicJwk")?.let { JSONObject().put("publicJwk", it) }
+		return proof
 	}
 
 	private suspend fun decryptChapterImages(chapterUrl: String, slug: String, chapterNum: String, lang: String): List<String> {
 		val (rctx0, rctx1) = getReaderContext(chapterUrl)
 		val (token, nonce) = generateToken(rctx0, rctx1, slug, chapterNum)
-		val sessionData = fetchSessionData(token, lang)
-		return decryptSessionImages(sessionData, rctx0, nonce)
+		val sessionData = fetchSessionData(token, lang, chapterUrl)
+		return decryptSessionImages(sessionData, rctx0, nonce, chapterUrl)
 	}
 
 	private suspend fun getReaderContext(url: String): Pair<String, String> {
@@ -516,9 +444,10 @@ internal class LunarAnime(context: MangaLoaderContext) :
 		error("Failed to find LunarX reader context")
 	}
 
-	private suspend fun fetchSessionData(token: String, lang: String): String {
+	private suspend fun fetchSessionData(token: String, lang: String, chapterUrl: String): String {
 		val url = "$apiBaseUrl/api/manga/r/$token?language=$lang"
-		val root = apiGetJson(url, requiresDeviceKey = true)
+		val root = apiGetJson(url, requiresDeviceKey = true, browserUrl = chapterUrl)
+		if (LunarReaderSession.requiresValidation(root, emptyList())) requestDeviceValidation(chapterUrl)
 		return root.optJSONObject("data")
 			?.optString("session_data")
 			?.nullIfEmpty()
@@ -653,7 +582,7 @@ internal class LunarAnime(context: MangaLoaderContext) :
 		return base64UrlEncode(encrypted) to nonce
 	}
 
-	private fun decryptSessionImages(sessionData: String, rctx0: String, nonce: String): List<String> {
+	private fun decryptSessionImages(sessionData: String, rctx0: String, nonce: String, chapterUrl: String): List<String> {
 		val ciphertext = runCatching {
 			Base64.getDecoder().decode(sessionData.padBase64())
 		}.recoverCatching {
@@ -673,13 +602,18 @@ internal class LunarAnime(context: MangaLoaderContext) :
 					String(doFinal(ciphertext), Charsets.UTF_8)
 				}
 			}.getOrNull()?.takeIf { it.startsWith('{') || it.startsWith('[') }
-		}?.replace("\\/", "/") ?: error("Failed to decrypt LunarX chapter data")
-		val payload = parseDecryptedPayload(decrypted) ?: return emptyList()
-		return jsonArrayToStrings(
+		}?.replace("\\/", "/") ?: requestDeviceValidation(chapterUrl)
+		val payload = parseDecryptedPayload(decrypted) ?: error("Invalid LunarX chapter data")
+		val images = jsonArrayToStrings(
 			payload.optJSONObject("data")?.optJSONArray("images")
 				?: payload.optJSONArray("images")
 				?: payload.optJSONArray("chapter_images"),
 		)
+		if (LunarReaderSession.requiresValidation(payload, images)) requestDeviceValidation(chapterUrl)
+		return images.map { image ->
+			apiBaseUrl.toHttpUrl().resolve(image)?.toString()
+				?: throw ParseException("Invalid LunarX page URL", chapterUrl)
+		}
 	}
 
 	private fun deviceKeyThumbprint(): String? {
@@ -833,21 +767,11 @@ internal class LunarAnime(context: MangaLoaderContext) :
 	private fun String.sha256(): ByteArray = MessageDigest.getInstance("SHA-256").digest(toByteArray())
 
 	private var keyPairJson: JSONObject? = null
-	private var dpopPrivateKey: PrivateKey? = null
 
 	private companion object {
 		private const val apiBaseUrl = "https://api.lunarx.to"
 		private const val CDN_HOST = "vault.lunarx.to"
 		private const val SEARCH_PAGE_SIZE = 100
-		private const val EXPORT_KEYS_JS = """
-			(function() {
-				try {
-					var stored = localStorage.getItem("lunar-device-key-jwk");
-					if (stored) return JSON.parse(stored);
-				} catch(e) {}
-				return null;
-			})();
-		"""
 		private val nextFPushRegex = Regex("""self\.__next_f\.push\(\[1,"(.*?)"\]\)""", RegexOption.DOT_MATCHES_ALL)
 		private val dictRegex = Regex("""\{[^{}]*\}""")
 		private val randAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
