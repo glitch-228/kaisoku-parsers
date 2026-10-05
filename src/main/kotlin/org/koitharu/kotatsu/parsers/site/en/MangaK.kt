@@ -77,6 +77,7 @@ internal class MangaK(context: MangaLoaderContext) :
             isSearchWithFiltersSupported = true,
             isMultipleTagsSupported = true,
             isTagsExclusionSupported = true,
+            isAuthorSearchSupported = true,
         )
 
     override suspend fun getFilterOptions() = MangaListFilterOptions(
@@ -144,6 +145,10 @@ internal class MangaK(context: MangaLoaderContext) :
                 append("&q=")
                 // api does not like commans and character limits to 60-70
                 append(query.replace(",", "").urlEncoded())
+            }
+
+            filter.author?.trim()?.takeIf(String::isNotEmpty)?.let {
+                append("&author=").append(it.urlEncoded())
             }
 
             if (filter.tags.isNotEmpty()) {

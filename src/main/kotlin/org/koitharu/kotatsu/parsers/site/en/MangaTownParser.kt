@@ -10,6 +10,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 import java.util.*
+import org.jsoup.nodes.Document
 
 @MangaSourceParser("MANGATOWN", "MangaTown", "en")
 internal class MangaTownParser(context: MangaLoaderContext) :
@@ -337,8 +338,17 @@ internal class MangaTownParser(context: MangaLoaderContext) :
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val fullUrl = chapter.url.toAbsoluteUrl(domain)
         val doc = webClient.httpGet(fullUrl, getRequestHeaders()).parseHtml()
-        val pageSelect = doc.body().selectFirst("div.page_select select") ?: return emptyList()
-        val options = pageSelect.select("option").filterNot { it.attr("value").endsWith("featured.html") }
+        parsePages(doc).takeIf(List<MangaPage>::isNotEmpty)?.let { return it }
+        val mobile = webClient.httpGet(chapter.url.toAbsoluteUrl(mobileDomain), getRequestHeaders()).parseHtml()
+        return parsePages(mobile)
+    }
+
+    private val mobileDomain: String get() = "m." + domain.removePrefix("www.")
+
+    private fun parsePages(doc: Document): List<MangaPage> {
+        val options = doc.select("div.page_select select option, select.index-page option")
+            .filter { it.attr("value").isNotBlank() && !it.attr("value").endsWith("featured.html") }
+            .distinctBy { it.attrAsRelativeUrl("value") }
         if (options.isNotEmpty()) {
             return options.mapIndexed { _, option ->
                 val href = option.attrAsRelativeUrl("value")
@@ -350,7 +360,7 @@ internal class MangaTownParser(context: MangaLoaderContext) :
                 )
             }
         }
-        val imgElements = doc.select("div#viewer img")
+        val imgElements = doc.select("div#viewer img, div.mangaread-img img")
         return imgElements.map { img ->
             val src = img.attrAsAbsoluteUrl("src")
             MangaPage(
@@ -366,7 +376,9 @@ internal class MangaTownParser(context: MangaLoaderContext) :
     override suspend fun getPageUrl(page: MangaPage): String {
         if (page.url.startsWith("http")) return page.url
         val doc = webClient.httpGet(page.url.toAbsoluteUrl(domain), getRequestHeaders()).parseHtml()
-        return doc.selectFirst("div#viewer img")?.attrAsAbsoluteUrl("src")
+        doc.selectFirst("div#viewer img, div.mangaread-img img")?.src()?.let { return it }
+        val mobile = webClient.httpGet(page.url.toAbsoluteUrl(mobileDomain), getRequestHeaders()).parseHtml()
+        return mobile.selectFirst("div#viewer img, div.mangaread-img img")?.requireSrc()
             ?: throw Exception("Could not find image")
     }
 

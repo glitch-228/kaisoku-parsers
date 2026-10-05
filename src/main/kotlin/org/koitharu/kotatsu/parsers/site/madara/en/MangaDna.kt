@@ -123,6 +123,13 @@ internal class MangaDna(context: MangaLoaderContext) :
 					.firstOrNull()?.tableValue()?.textOrNull()
 
 		manga.copy(
+			title = body.selectFirst("h1.entry-title")?.textOrNull() ?: manga.title,
+			coverUrl = body.selectFirst("div.summary_image img")?.src() ?: manga.coverUrl,
+			largeCoverUrl = body.selectFirst("div.summary_image img")?.src() ?: manga.largeCoverUrl,
+			authors = body.select(".author-content a, .artist-content a").mapNotNullToSet { it.textOrNull() }
+				.ifEmpty { manga.authors },
+			rating = body.selectFirst("#averagerate, .avgrate")?.text()?.trim()?.toFloatOrNull()
+				?.takeIf { it in 0f..5f }?.div(5f) ?: manga.rating,
 			tags = doc.body().select(selectGenre).mapToSet { a ->
 				MangaTag(
 					key = a.attr("href").removeSuffix('/').substringAfterLast('/'),
