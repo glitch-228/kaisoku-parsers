@@ -20,16 +20,22 @@ internal class Voratoon(context: MangaLoaderContext) :
 
 	override val configKeyDomain = ConfigKey.Domain("api.voratoon.com", "v1.voratoon.com")
 
+	override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
+		.set("Referer", "https://v5.voratoon.com/")
+		.set("Origin", "https://v5.voratoon.com")
+		.set("Accept", "application/json")
+		.build()
+
 	override suspend fun getFavicons(): Favicons {
 		return Favicons(
 			listOf(
 				Favicon(
-					url = "https://v1.voratoon.com/icon.png",
+					url = "https://v5.voratoon.com/icon.png",
 					size = 512,
 					rel = null,
 				),
 			),
-			referer = "https://v1.voratoon.com",
+			referer = "https://v5.voratoon.com",
 		)
 	}
 
@@ -88,9 +94,9 @@ internal class Voratoon(context: MangaLoaderContext) :
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val sort = when (order) {
 			SortOrder.UPDATED -> "latest"
-			SortOrder.POPULARITY -> "totalViews"
+			SortOrder.POPULARITY -> "popularity"
 			SortOrder.RATING -> "rating"
-			SortOrder.ALPHABETICAL -> "title"
+			SortOrder.ALPHABETICAL -> "alphabetical"
 			else -> "latest"
 		}
 		val json = webClient.httpGet(buildListUrl(page, sort, filter)).parseJson()
@@ -103,23 +109,20 @@ internal class Voratoon(context: MangaLoaderContext) :
 		append("?take=").append(pageSize)
 		append("&page=").append(page)
 		append("&sort=").append(sort)
-		append("&sortOrder=desc")
+		append("&sortOrder=").append(if (sort == "alphabetical") "asc" else "desc")
 		append("&includeMeta=true")
 		append("&takeChapter=1")
 		filter.query?.takeIf { it.isNotBlank() }?.let {
 			append("&title=").append(it.urlEncoded())
 		}
-		// API accepts a single genre value only
-		filter.tags.firstOrNull()?.let {
-			append("&filter=genreIds%3D%3D").append(it.key.urlEncoded())
+		if (filter.tags.isNotEmpty()) {
+			append("&genreIds=").append(filter.tags.joinToString(",") { it.key }.urlEncoded())
 		}
-		// API accepts a single format value only
-		filter.types.firstOrNull()?.let {
-			append("&filter=format%3D%3D").append(it.name.lowercase())
+		filter.types.oneOrThrowIfMany()?.let {
+			append("&format=").append(it.name.lowercase(Locale.ROOT))
 		}
-		// API accepts a single status value only
-		filter.states.firstOrNull()?.let {
-			append("&filter=status%3D%3D").append(it.toApiValue())
+		filter.states.oneOrThrowIfMany()?.let {
+			append("&status=").append(it.toApiValue())
 		}
 	}
 
@@ -128,7 +131,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 		val detailsDeferred = async { webClient.httpGet(buildDetailsUrl(slug)).parseJson() }
 		val chaptersDeferred = async { webClient.httpGet(buildChaptersUrl(slug)).parseJson() }
 		val json = detailsDeferred.await()
-		val item = json.optJSONArray("data")?.optJSONObject(0) ?: return@coroutineScope manga
+		val item = json.getJSONObject("data")
 		val data = item.optJSONObject("data") ?: return@coroutineScope manga
 		val chapters = chaptersDeferred.await().optJSONArray("data")
 		manga.copy(
@@ -161,11 +164,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 		return fetchChapterPages(slug, formatChapterNumber(chapterNumber))
 	}
 
-	private fun buildDetailsUrl(slug: String): String = buildString {
-		append("https://").append(domain).append("/series")
-		append("?take=1&page=1&includeMeta=true&takeChapter=1")
-		append("&filter=slug%3D%3D").append(slug.urlEncoded())
-	}
+	private fun buildDetailsUrl(slug: String): String = "https://$domain/series/${slug.urlEncoded()}"
 
 	private fun buildChaptersUrl(slug: String): String =
 		"https://$domain/series/${slug.urlEncoded()}/chapters"
@@ -173,11 +172,16 @@ internal class Voratoon(context: MangaLoaderContext) :
 	private suspend fun fetchChapterPages(slug: String, chapterNumber: String): List<MangaPage> {
 		val url = "${buildChaptersUrl(slug)}/${chapterNumber.urlEncoded()}"
 		val root = webClient.httpGet(url).parseJson()
-		val images = root.optJSONObject("data")
-			?.optJSONObject("data")
-			?.optJSONArray("images")
-			?: return emptyList()
-		return List(images.length()) { index -> images.optString(index).trim() }
+		val data = root.getJSONObject("data")
+		val images = data.optJSONObject("data")?.optJSONArray("images")
+		val imageUrls = if (images != null && images.length() > 0) {
+			List(images.length()) { index -> images.optString(index).trim() }
+		} else {
+			val dataImages = data.optJSONObject("dataImages") ?: return emptyList()
+			dataImages.keys().asSequence().toList().sortedBy { it.toIntOrNull() ?: Int.MAX_VALUE }
+				.map { dataImages.getString(it).trim() }
+		}
+		return imageUrls
 			.filter { it.isNotEmpty() }
 			.distinct()
 			.map { imageUrl ->
@@ -212,7 +216,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 			title = data.optString("title").ifBlank { "Untitled" },
 			altTitles = setOfNotNull(data.optString("nativeTitle").ifBlank { null }),
 			url = "/series/$slug",
-			publicUrl = "https://v1.voratoon.com/series/$slug",
+			publicUrl = "https://v5.voratoon.com/series/$slug",
 			rating = data.optDouble("rating", 0.0).let { if (it > 0f) it.toFloat() / 10f else RATING_UNKNOWN },
 			contentRating = ContentRating.SAFE,
 			coverUrl = data.optString("coverImage").ifEmpty { null },

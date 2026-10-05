@@ -3,8 +3,8 @@ package org.koitharu.kotatsu.parsers.site.ru.rulib
 import androidx.collection.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.json.JSONArray
@@ -77,11 +77,7 @@ internal abstract class LibSocialParser(
 	)
 
 	final override fun intercept(chain: Interceptor.Chain): Response {
-		val token = runBlocking { getAuthData() }?.optJSONObject("token")?.getStringOrNull("access_token")
 		val requestBuilder = chain.request().newBuilder()
-		if (!token.isNullOrEmpty()) {
-			requestBuilder.header("Authorization", "Bearer $token")
-		}
 		requestBuilder.header("Site-Id", siteId.toString())
 		return chain.proceed(requestBuilder.build())
 	}
@@ -157,7 +153,7 @@ internal abstract class LibSocialParser(
 				else -> null
 			},
 		)
-		val json = webClient.httpGet(urlBuilder.build()).parseJson()
+		val json = apiGet(urlBuilder.build()).parseJson()
 		val data = json.getJSONArray("data")
 		return data.mapJSON(::parseManga)
 	}
@@ -176,7 +172,7 @@ internal abstract class LibSocialParser(
 			.addQueryParameter("fields[]", "authors")
 			.addQueryParameter("fields[]", "close_view")
 			.build()
-		val json = webClient.httpGet(url).parseJson().getJSONObject("data")
+		val json = apiGet(url).parseJson().getJSONObject("data")
 		val genres = json.getJSONArray("genres").mapJSON { jo ->
 			MangaTag(title = jo.getString("name"), key = "g" + jo.getInt("id"), source = source)
 		}
@@ -248,7 +244,7 @@ internal abstract class LibSocialParser(
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> = coroutineScope {
 		val pages = async {
-			webClient.httpGet(
+			apiGet(
 				concatUrl("https://$apiHost/api/manga/", chapter.url),
 			).parseJson().getJSONObject("data")
 		}
@@ -273,7 +269,7 @@ internal abstract class LibSocialParser(
 	}
 
 	override suspend fun getRelatedManga(seed: Manga): List<Manga> {
-		val json = webClient.httpGet(
+		val json = apiGet(
 			HttpUrl.Builder()
 				.scheme(SCHEME_HTTPS)
 				.host(apiHost)
@@ -337,7 +333,7 @@ internal abstract class LibSocialParser(
 			.addPathSegment(manga.url)
 			.addPathSegment("chapters")
 			.build()
-		val json = webClient.httpGet(url).parseJson().getJSONArray("data")
+		val json = apiGet(url).parseJson().getJSONArray("data")
 		val builder = ChaptersListBuilder(json.length())
 		val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
 		val useBranching = config[splitTranslationsKey]
@@ -386,7 +382,7 @@ internal abstract class LibSocialParser(
 	}
 
 	private suspend fun fetchTags(type: String): List<MangaTag> {
-		val data = webClient.httpGet(
+		val data = apiGet(
 			HttpUrl.Builder()
 				.scheme(SCHEME_HTTPS)
 				.host(apiHost)
@@ -407,7 +403,7 @@ internal abstract class LibSocialParser(
 	}
 
 	private suspend fun fetchServers(): ScatterMap<String, String> {
-		val json = webClient.httpGet(
+		val json = apiGet(
 			HttpUrl.Builder()
 				.scheme(SCHEME_HTTPS)
 				.host(apiHost)
@@ -458,6 +454,18 @@ internal abstract class LibSocialParser(
 		tags.forEach { x -> if (names.add(x.title)) result.add(x) }
 		return result
 	}
+
+    // Read current WebView credentials in the suspend request path. Image interception must
+    // never block an OkHttp thread waiting for WebView, or retain a token after logout.
+    private suspend fun apiGet(url: String): Response = apiGet(url.toHttpUrl())
+
+    private suspend fun apiGet(url: HttpUrl): Response {
+        val headers = getRequestHeaders().newBuilder()
+        val token = getAuthData()?.optJSONObject("token")?.getStringOrNull("access_token")
+        if (!token.isNullOrEmpty()) headers.set("Authorization", "Bearer $token")
+        headers.set("Site-Id", siteId.toString())
+        return webClient.httpGet(url, headers.build())
+    }
 
 	private suspend fun getAuthData(): JSONObject? {
 		val raw = WebViewHelper(context).getLocalStorageValue(domain, "auth") ?: return null
