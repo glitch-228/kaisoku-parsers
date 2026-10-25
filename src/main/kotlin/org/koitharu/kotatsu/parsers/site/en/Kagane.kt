@@ -28,12 +28,15 @@ import org.koitharu.kotatsu.parsers.util.parseSafe
 import org.koitharu.kotatsu.parsers.util.urlBuilder
 
 import okhttp3.Interceptor
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -55,7 +58,7 @@ import kotlinx.coroutines.sync.withLock
 internal class Kagane(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.KAGANE, pageSize = 35) {
 
-    override val configKeyDomain = ConfigKey.Domain("kagane.to")
+    override val configKeyDomain = ConfigKey.Domain("kagane.si", "kagane.to")
     private val apiUrl = "https://$domain"
 
     private val dataSaverKey = ConfigKey.PreferredImageServer(
@@ -209,14 +212,10 @@ internal class Kagane(context: MangaLoaderContext) :
             put("Unofficial")
             put("Mixed")
         })
-        jsonBody.put("content_lang", JSONArray().apply {
-            val selectedLocale = filter.locale
-            if (selectedLocale != null) {
-                put(selectedLocale.toKaganeLangCode())
-            } else {
-                KAGANE_LANGS.forEach(::put)
-            }
-        })
+        // An omitted language filter means every language. Expanding every locale exceeds the API limit.
+        filter.locale?.let { selectedLocale ->
+            jsonBody.put("content_lang", JSONArray().put(selectedLocale.toKaganeLangCode()))
+        }
 
         val genreIds = filter.tags.map { it.key }.filter { UUID_REGEX.matches(it) }
         if (genreIds.isNotEmpty()) {
@@ -526,14 +525,7 @@ internal class Kagane(context: MangaLoaderContext) :
                 ?: JSONArray(),
         )
         if (chapters.isEmpty()) {
-            val chaptersUrl = "$apiUrl/api/v2/series/$seriesId/books/list"
-            val chapterResp = webClient.httpGet(chaptersUrl, headers).parseJson()
-            chapters = parseChapters(
-                chapterResp.optJSONArray("series_books")
-                    ?: chapterResp.optJSONArray("seriesBooks")
-                    ?: chapterResp.optJSONArray("content")
-                    ?: JSONArray(),
-            )
+            chapters = parseChapters(fetchSeriesBooks(seriesId, headers))
         }
 
         return manga.copy(
@@ -547,6 +539,33 @@ internal class Kagane(context: MangaLoaderContext) :
             chapters = chapters,
             contentRating = parseContentRating(json.optString("content_rating")) ?: manga.contentRating,
         )
+    }
+
+    private suspend fun fetchSeriesBooks(seriesId: String, headers: Headers): JSONArray {
+        val books = JSONArray()
+        val seenCursors = HashSet<String>()
+        var cursor: String? = null
+        var pageCount = 0
+        do {
+            currentCoroutineContext().ensureActive()
+            val url = "$apiUrl/api/v2/series/$seriesId/books".toHttpUrl().newBuilder()
+                .addQueryParameter("limit", "500")
+                .apply { cursor?.let { addQueryParameter("before", it) } }.build()
+            if (++pageCount > 128) throw ParseException("Chapter pagination limit exceeded", url.toString())
+            val page = webClient.httpGet(url, headers).parseJson()
+            val items = page.optJSONArray("items") ?: throw ParseException("Chapter items are missing", url.toString())
+            if (items.length() + books.length() > 20_000) throw ParseException("Chapter list is too large", url.toString())
+            for (index in 0 until items.length()) books.put(items.get(index))
+            cursor = when (val next = page.opt("next_cursor")) {
+                null, JSONObject.NULL -> null
+                is String -> next.takeIf { it.isNotBlank() }
+                else -> throw ParseException("Invalid chapter pagination cursor", url.toString())
+            }
+            if (cursor != null && (items.length() == 0 || !seenCursors.add(cursor))) {
+                throw ParseException("Incomplete or repeated chapter pagination", url.toString())
+            }
+        } while (cursor != null)
+        return books
     }
 
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {

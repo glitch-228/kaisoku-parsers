@@ -97,10 +97,9 @@ internal class LectorHentai(context: MangaLoaderContext) :
 		val chapterUrl = chapter.url.toAbsoluteUrl(domain)
 		val docs = webClient.httpGet(chapterUrl).parseHtml()
 		val script = docs.selectFirstOrThrow(selectTestScript).data()
-		val images = script.substringAfterLast("\"images\": [").substringBefore("]")
-			.replace(" ", "").replace("\"", "").replace("\n", "").split(",").dropLast(1)
+		val images = LectorReaderPayload.images(script, chapterUrl)
 		return images.map { img ->
-			val url = "https://" + img.substringAfter("//")
+			val url = img.toAbsoluteUrl(domain)
 			MangaPage(
 				id = generateUid(url),
 				url = url,

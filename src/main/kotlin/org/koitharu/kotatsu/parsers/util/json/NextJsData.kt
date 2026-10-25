@@ -12,11 +12,43 @@ internal fun Document.nextJsObjects(): Sequence<JSONObject> {
             runCatching { JSONArray(argument).opt(1) as? String }.getOrNull()
         }
     }.joinToString("")
-    return payload.lineSequence().mapNotNull { line ->
+    return records(payload).mapNotNull { line ->
         val json = line.substringAfter(':', "")
         if (json.startsWith('{') || json.startsWith('[')) runCatching { JSONTokener(json).nextValue() }.getOrNull()
         else null
     }.flatMap { objects(it) }
+}
+
+// RSC text records carry a UTF-8 byte length and need not end with a newline. Their text may itself
+// contain newlines or JSON-looking advertising markup; it is never a JSON data record.
+private fun records(payload: String): Sequence<String> = sequence {
+    val bytes = payload.toByteArray(Charsets.UTF_8)
+    var cursor = 0
+    while (cursor < bytes.size) {
+        val start = cursor
+        while (cursor < bytes.size && bytes[cursor] != ':'.code.toByte() && bytes[cursor] != 10.toByte()) cursor++
+        if (cursor == bytes.size) break
+        if (bytes[cursor] == 10.toByte()) {
+            cursor++
+            continue
+        }
+        val content = ++cursor
+        if (content == bytes.size) break
+        if (bytes[content] == 'T'.code.toByte()) {
+            var comma = content + 1
+            while (comma < bytes.size && bytes[comma].toInt().toChar() in "0123456789abcdefABCDEF") comma++
+            if (comma < bytes.size && bytes[comma] == ','.code.toByte()) {
+                val size = String(bytes, content + 1, comma - content - 1, Charsets.UTF_8).toIntOrNull(16)
+                    ?: break
+                if (size < 0 || size > bytes.size - comma - 1) break
+                cursor = comma + 1 + size
+                continue
+            }
+        }
+        while (cursor < bytes.size && bytes[cursor] != 10.toByte()) cursor++
+        yield(String(bytes, start, cursor - start, Charsets.UTF_8))
+        if (cursor < bytes.size) cursor++
+    }
 }
 
 private fun objects(value: Any?, depth: Int = 0): Sequence<JSONObject> = sequence {
