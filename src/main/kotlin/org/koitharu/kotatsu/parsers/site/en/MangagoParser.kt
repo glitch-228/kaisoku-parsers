@@ -160,6 +160,7 @@ internal class MangagoParser(context: MangaLoaderContext) :
             val title = linkElement.attr("title").ifEmpty {
                 linkElement.selectFirst("h2 a")?.text() ?: return@mapNotNull null
             }
+            if (title == "DELETE" && DELETED_UPLOADS_PATH.matches(href)) return@mapNotNull null
             val thumbnailElem = linkElement.selectFirst("img") ?: return@mapNotNull null
             val thumbnailUrl = thumbnailElem.attr("abs:data-src").ifEmpty {
                 thumbnailElem.attr("abs:src")
@@ -780,6 +781,7 @@ internal class MangagoParser(context: MangaLoaderContext) :
     }
 
     private companion object {
+        private val DELETED_UPLOADS_PATH = Regex("""/read-manga/delete_\d+/?""")
         private val IMG_SRCS_REGEX = Regex("""var imgsrcs\s*=\s*['"]([a-zA-Z0-9+=/]+)['"]""")
         private val COLS_REGEX = Regex("""var\s*widthnum\s*=\s*heightnum\s*=\s*(\d+);""")
         private val KEY_LOCATION_REGEX = Regex("""str\.charAt\(\s*(\d+)\s*\)""")
