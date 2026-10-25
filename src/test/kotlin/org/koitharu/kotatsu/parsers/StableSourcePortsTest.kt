@@ -30,10 +30,9 @@ internal class StableSourcePortsTest {
             query = "a & b", tags = tags, states = setOf(MangaState.FINISHED), types = setOf(ContentType.MANHWA),
         )).single()
         val url = ctx.requests.single().url
-        assertEquals("28,3", url.queryParameter("genreIds"))
-        assertEquals("completed", url.queryParameter("status"))
-        assertEquals("manhwa", url.queryParameter("format"))
-        assertEquals("alphabetical", url.queryParameter("sort"))
+        assertEquals("genreIds==28;genreIds==3;format=in=(manhwa);status=in=(completed)", url.queryParameter("filter"))
+        assertEquals(1, url.queryParameterValues("filter").size)
+        assertEquals("title", url.queryParameter("sort"))
         assertEquals("asc", url.queryParameter("sortOrder"))
         assertEquals("a & b", url.queryParameter("title"))
         assertEquals(parser.generateUid(12L), manga.id)
@@ -42,7 +41,7 @@ internal class StableSourcePortsTest {
 
     @Test fun `Voratoon details and old API id chapters keep saved identities`() = runTest {
         val ctx = Context { request -> when (request.url.encodedPath) {
-            "/series/fixture" -> """{"data":{"id":12,"data":{"title":"Updated","rating":8,"genres":[]}}}"""
+            "/series" -> """{"data":[{"id":12,"data":{"title":"Updated","rating":8,"genres":[]}}]}"""
             "/series/fixture/chapters" -> """{"data":[{"id":55,"data":{"index":2}}]}"""
             else -> """{"data":{"dataImages":{"2":"https://cdn.test/2.jpg","1":"https://cdn.test/1.jpg"}}}"""
         } }
