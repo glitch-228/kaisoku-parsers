@@ -7,4 +7,6 @@ import org.koitharu.kotatsu.parsers.site.keyoapp.KeyoappParser
 
 @MangaSourceParser("TIMELESSTOONS", "TimelessToons", "en")
 internal class TimelessToons(context: MangaLoaderContext) :
-	KeyoappParser(context, MangaParserSource.TIMELESSTOONS, "timelesstoons.org")
+	KeyoappParser(context, MangaParserSource.TIMELESSTOONS, "timelesstoons.org") {
+    override val selectFallbackCards = "div.grid > div.group.latest-poster"
+}

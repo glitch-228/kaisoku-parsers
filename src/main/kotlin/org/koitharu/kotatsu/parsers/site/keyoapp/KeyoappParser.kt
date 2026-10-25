@@ -31,6 +31,8 @@ internal abstract class KeyoappParser(
 		SortOrder.NEWEST,
 	)
 
+	protected open val selectFallbackCards = "div.grid > div.group"
+
 	protected open val listUrl = "series/"
 	protected open val datePattern = "MMM d, yyyy"
 
@@ -96,7 +98,7 @@ internal abstract class KeyoappParser(
 		val manga = ArrayList<Manga>()
 
 		doc.select("#searched_series_page button").ifEmpty {
-			doc.select("div.grid > div.group")
+			doc.select(selectFallbackCards)
 		}.map { div ->
 
 			val title = div.selectFirst("h3")?.text().orEmpty()
