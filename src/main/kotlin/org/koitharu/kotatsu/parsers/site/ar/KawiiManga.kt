@@ -4,6 +4,7 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
 import org.koitharu.kotatsu.parsers.exception.ParseException
 
 import org.koitharu.kotatsu.parsers.model.Manga
@@ -34,7 +35,9 @@ internal class KawiiManga(context: MangaLoaderContext) :
 
     override val configKeyDomain = ConfigKey.Domain("kawaiimanga.org")
 
-    private val apiUrl = "https://manga-api.kawaii-anime.com/api/manga/own"
+    private val apiBase = "https://manga-api.kawaii-anime.com/api/manga"
+    private val apiUrl = "$apiBase/own"
+    private val tokens = KawaiiTokenStore()
 
     override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
         .set("x-app-key", "km_2026_live")
@@ -67,13 +70,13 @@ internal class KawiiManga(context: MangaLoaderContext) :
             }
             "$apiUrl?action=browse&page=$page&sort=$sort"
         }
-        val json = webClient.httpGet(url).parseJsonObject()
+        val json = apiGet(url).parseJsonObject()
         return parseMangaList(json)
     }
 
     override suspend fun getDetails(manga: Manga): Manga = coroutineScope {
         val slug = manga.url
-        val json = webClient.httpGet("$apiUrl?action=series&slug=$slug").parseJsonObject()
+        val json = apiGet("$apiUrl?action=series&slug=$slug").parseJsonObject()
         val detailedManga = parseManga(json)
         val chapters = parseChapters(json.optJSONArray("chapters"), slug)
         detailedManga.copy(chapters = chapters)
@@ -81,7 +84,7 @@ internal class KawiiManga(context: MangaLoaderContext) :
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val chapterId = chapter.url.substringAfterLast('#')
-        val json = webClient.httpGet("$apiUrl?action=pages&chapterId=$chapterId").parseJsonObject()
+        val json = apiGet("$apiUrl?action=pages&chapterId=$chapterId").parseJsonObject()
         val pagesArray = json.optJSONArray("pages") ?: return emptyList()
         return (0 until pagesArray.length()).map { i ->
             val url = pagesArray.getString(i)
@@ -94,9 +97,25 @@ internal class KawiiManga(context: MangaLoaderContext) :
         }
     }
     
-    private fun Response.parseJsonObject(): JSONObject {
-        val body = body?.string() ?: throw ParseException("Empty response body", request.url.toString())
-        return JSONObject(body)
+    private suspend fun apiGet(url: String): Response {
+        suspend fun token() = tokens.get {
+            val json = webClient.httpGet("$apiBase/token").parseJsonObject()
+            json.getString("token") to json.optLong("expiresIn", 0)
+        }
+        val used = token()
+        val headers = getRequestHeaders().newBuilder().set("x-app-token", used).build()
+        return try {
+            webClient.httpGet(url, headers)
+        } catch (error: AuthRequiredException) {
+            tokens.invalidate(used)
+            val refreshed = getRequestHeaders().newBuilder().set("x-app-token", token()).build()
+            webClient.httpGet(url, refreshed)
+        }
+    }
+
+    private fun Response.parseJsonObject(): JSONObject = use {
+        val text = body?.string() ?: throw ParseException("Empty response body", request.url.toString())
+        JSONObject(text)
     }
 
     private fun parseMangaList(json: JSONObject): List<Manga> {
